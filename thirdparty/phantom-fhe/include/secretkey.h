@@ -1,5 +1,8 @@
 #pragma once
 #include <fstream>
+#include <vector>
+
+#include <cuda_runtime.h>
 
 #include "context.cuh"
 
@@ -47,6 +50,13 @@ public:
                                           size_t chain_index, const cudaStream_t &stream) const;
 
 public:
+
+    /** Public key as two-component ciphertext; used by MOAI key export tools. */
+    [[nodiscard]] const PhantomCiphertext &cipher() const noexcept { return pk_; }
+
+    /** Load pk from host (2 * coeff_modulus_size * N uint64, NTT), e.g. moai_gen_keys public_key.bin. */
+    void load_public_key_from_host_ntt(const PhantomContext &context, const uint64_t *host, size_t word_count,
+                                       const cudaStream_t &stream);
 
     PhantomPublicKey() = default;
 
@@ -110,6 +120,10 @@ public:
     [[nodiscard]] inline auto public_keys_ptr() const {
         return public_keys_ptr_.get();
     }
+
+    /** One host row per tower; each row length = 2 * coeff_modulus_size * N (moai_gen_keys relin/galois tower bin). */
+    void load_relin_towers_from_host(const PhantomContext &context, const std::vector<const uint64_t *> &tower_host,
+                                     const cudaStream_t &stream);
 };
 
 /** PhantomGaloisKey stores Galois keys.
@@ -142,6 +156,11 @@ public:
     [[nodiscard]] auto &get_relin_keys(size_t index) const {
         return relin_keys_.at(index);
     }
+
+    [[nodiscard]] std::size_t galois_key_count() const noexcept { return relin_keys_.size(); }
+
+    /** Replace with pre-generated Galois keys (one PhantomRelinKey per galois element). */
+    void load_from_relin_keys(std::vector<PhantomRelinKey> &&keys);
 };
 
 /** PhantomSecretKey contains the secret key in RNS and NTT form
@@ -209,6 +228,13 @@ public:
     PhantomSecretKey &operator=(PhantomSecretKey &&) = default;
 
     ~PhantomSecretKey() = default;
+
+    /** Device pointer to secret key polynomial in NTT form (length = coeff_modulus_size * poly_modulus_degree). */
+    [[nodiscard]] const uint64_t *device_sk_ntt() const noexcept { return secret_key_array_.get(); }
+
+    /** Overwrite SK with NTT data from host (moai_gen_keys secret_key.bin). */
+    void load_secret_key_ntt_from_host(const PhantomContext &context, const uint64_t *host, size_t word_count,
+                                       const cudaStream_t &stream);
 
     [[nodiscard]] PhantomPublicKey gen_publickey(const PhantomContext &context) const;
 

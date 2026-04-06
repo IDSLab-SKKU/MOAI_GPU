@@ -65,10 +65,11 @@ int main()
     // BatchLN_test();
     // cout << "unit test passed!" << endl;
 
-    // cout << "single layer test" << endl;
-    // single_layer_test();
-    // cout << "single layer test passed!" << endl;
-
+    // Precomputed keys (optional): export MOAI_PRECOMPUTED_KEYS_DIR=/path/to/keys_dnum_35
+    // or MOAI_KEYS_BASE=/path/to/keys and MOAI_ALPHA=1 (selects .../keys_dnum_<dnum>).
+    cout << "single layer test" << endl;
+    single_layer_test();
+    cout << "single layer test passed!" << endl;
 
     // cout << "Rotary Position Embedding test" << endl;
     // rotary_pos_embed_test();
@@ -86,9 +87,9 @@ int main()
     // silu_test();
     // cout << "SiLU coefficient export test passed!" << endl;
 
-    cout << "RMSNorm test" << endl;
-    RMSNorm_test();
-    cout << "RMSNorm test passed!" << endl;
+    // cout << "RMSNorm test" << endl;
+    // RMSNorm_test();
+    // cout << "RMSNorm test passed!" << endl;
 
     return 0;
 }

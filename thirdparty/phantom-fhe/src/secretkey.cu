@@ -6,6 +6,7 @@
 #include <vector>
 #include <algorithm>
 #include <random>
+#include <stdexcept>
 
 using namespace std;
 using namespace phantom;
@@ -1039,4 +1040,63 @@ int PhantomSecretKey::invariant_noise_budget(const PhantomContext &context,
                          get_significant_bit_count_uint(norm.data(), coeff_mod_size) - 1;
 
     return max(0, bit_count_diff);
+}
+
+void PhantomSecretKey::load_secret_key_ntt_from_host(const PhantomContext &context, const uint64_t *host,
+                                                     size_t word_count, const cudaStream_t &stream) {
+    const size_t expected = context.coeff_mod_size_ * context.poly_degree_;
+    if (word_count != expected) {
+        throw invalid_argument("load_secret_key_ntt_from_host: word count mismatch");
+    }
+    cudaMemcpyAsync(secret_key_array_.get(), host, word_count * sizeof(uint64_t), cudaMemcpyHostToDevice, stream);
+    cudaStreamSynchronize(stream);
+}
+
+void PhantomPublicKey::load_public_key_from_host_ntt(const PhantomContext &context, const uint64_t *host,
+                                                      size_t word_count, const cudaStream_t &stream) {
+    prng_seed_a_ = make_cuda_auto_ptr<uint8_t>(phantom::util::global_variables::prng_seed_byte_count, stream);
+    random_bytes(prng_seed_a_.get(), phantom::util::global_variables::prng_seed_byte_count, stream);
+    pk_.resize(context, 0, 2, stream);
+    auto &key_parms = context.get_context_data(0).parms();
+    const size_t coeff_mod_size = key_parms.coeff_modulus().size();
+    const size_t poly_degree = key_parms.poly_modulus_degree();
+    const size_t expected = 2U * coeff_mod_size * poly_degree;
+    if (word_count != expected) {
+        throw invalid_argument("load_public_key_from_host_ntt: word count mismatch");
+    }
+    cudaMemcpyAsync(const_cast<uint64_t *>(pk_.data()), host, word_count * sizeof(uint64_t), cudaMemcpyHostToDevice,
+                    stream);
+    pk_.set_chain_index(0);
+    pk_.set_ntt_form(true);
+    gen_flag_ = true;
+    cudaStreamSynchronize(stream);
+}
+
+void PhantomRelinKey::load_relin_towers_from_host(const PhantomContext &context,
+                                                  const std::vector<const uint64_t *> &tower_host,
+                                                  const cudaStream_t &stream) {
+    const size_t dnum = tower_host.size();
+    auto &key_parms = context.get_context_data(0).parms();
+    const size_t coeff_mod_size = key_parms.coeff_modulus().size();
+    const size_t poly_degree = key_parms.poly_modulus_degree();
+    const size_t tower_words = 2U * coeff_mod_size * poly_degree;
+    public_keys_.resize(dnum);
+    for (size_t t = 0; t < dnum; ++t) {
+        public_keys_[t] = make_cuda_auto_ptr<uint64_t>(tower_words, stream);
+        cudaMemcpyAsync(public_keys_[t].get(), tower_host[t], tower_words * sizeof(uint64_t), cudaMemcpyHostToDevice,
+                        stream);
+    }
+    public_keys_ptr_ = make_cuda_auto_ptr<uint64_t *>(dnum, stream);
+    vector<uint64_t *> pk_ptr(dnum);
+    for (size_t t = 0; t < dnum; ++t) {
+        pk_ptr[t] = public_keys_[t].get();
+    }
+    cudaMemcpyAsync(public_keys_ptr_.get(), pk_ptr.data(), sizeof(uint64_t *) * dnum, cudaMemcpyHostToDevice, stream);
+    gen_flag_ = true;
+    cudaStreamSynchronize(stream);
+}
+
+void PhantomGaloisKey::load_from_relin_keys(std::vector<PhantomRelinKey> &&keys) {
+    relin_keys_ = std::move(keys);
+    gen_flag_ = true;
 }

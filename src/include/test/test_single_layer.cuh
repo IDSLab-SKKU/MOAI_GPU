@@ -1,4 +1,5 @@
 #include "include.cuh"
+#include "keys/moai_precomputed_keys.cuh"
 
 using namespace std;
 using namespace phantom;
@@ -413,6 +414,33 @@ void single_layer_test()
     parms.set_coeff_modulus(CoeffModulus::Create(poly_modulus_degree, coeff_bit_vec));
     parms.set_secret_key_hamming_weight(secret_key_hamming_weight);
     parms.set_sparse_slots(sparse_slots);
+
+    size_t moai_hybrid_alpha = 1;
+    if (const char *a = std::getenv("MOAI_ALPHA")) {
+        if (*a) {
+            moai_hybrid_alpha = static_cast<size_t>(std::strtoul(a, nullptr, 10));
+        }
+    }
+    parms.set_special_modulus_size(moai_hybrid_alpha);
+    {
+        size_t T = parms.coeff_modulus().size();
+        if (moai_hybrid_alpha == 0 || moai_hybrid_alpha >= T || (T % moai_hybrid_alpha) != 0) {
+            throw std::invalid_argument("MOAI_ALPHA invalid for hybrid KS (need T % alpha == 0)");
+        }
+    }
+
+    std::string moai_key_pack_dir;
+    if (const char *p = std::getenv("MOAI_PRECOMPUTED_KEYS_DIR")) {
+        if (*p) {
+            moai_key_pack_dir = p;
+        }
+    } else if (const char *b = std::getenv("MOAI_KEYS_BASE")) {
+        size_t T = parms.coeff_modulus().size();
+        size_t dnum = (T - moai_hybrid_alpha) / moai_hybrid_alpha;
+        moai_key_pack_dir = std::string(b) + "/keys_dnum_" + std::to_string(dnum);
+    }
+    const bool moai_use_precomputed = !moai_key_pack_dir.empty();
+
     double scale = pow(2.0, logp);
     // parms.set_coeff_modulus(CoeffModulus::Create(poly_modulus_degree, {60, 40, 40,40, 40,
     //     40,40,40,40,40,40,40,40,40, 40,40,40,40,40,40,40,40,60}));
@@ -423,21 +451,22 @@ void single_layer_test()
     cout << "Set encryption parameters and print" << endl;
     print_parameters(context);
 
-    // KeyGenerator keygen(context);
-    // SecretKey secret_key = keygen.secret_key();
-    // PublicKey public_key;
-    // keygen.create_public_key(public_key);
-    // RelinKeys relin_keys;
-    // keygen.create_relin_keys(relin_keys);
-    // GaloisKeys gal_keys;
-    // keygen.create_galois_keys(gal_keys);
-    // GaloisKeys gal_keys_boot;
+    if (moai_use_precomputed) {
+        cout << "MOAI: loading precomputed keys from " << moai_key_pack_dir << endl;
+    }
 
     PhantomSecretKey secret_key(context);
-    PhantomPublicKey public_key = secret_key.gen_publickey(context);
-    PhantomRelinKey relin_keys = secret_key.gen_relinkey(context);
-    // PhantomGaloisKey gal_keys = secret_key.create_galois_keys(context);
+    PhantomPublicKey public_key;
+    PhantomRelinKey relin_keys;
     PhantomGaloisKey gal_keys_boot;
+
+    if (moai_use_precomputed) {
+        moai::load_precomputed_keys_from_directory(context, moai_key_pack_dir, secret_key, public_key, relin_keys,
+                                                   gal_keys_boot);
+    } else {
+        public_key = secret_key.gen_publickey(context);
+        relin_keys = secret_key.gen_relinkey(context);
+    }
 
     // end
 
@@ -532,9 +561,10 @@ void single_layer_test()
     // keygen.create_galois_keys(gal_steps_vector, gal_keys_boot);
 
     // ckks_evaluator.decryptor.create_galois_keys_from_steps(gal_steps_vector, *(ckks_evaluator.galois_keys));
-    gal_keys_boot = secret_key.create_galois_keys(context);
-    // gal_keys = secret_key.create_galois_keys(context);
-    std::cout << "Galois key generated from steps vector." << endl;
+    if (!moai_use_precomputed) {
+        gal_keys_boot = secret_key.create_galois_keys(context);
+    }
+    std::cout << (moai_use_precomputed ? "Galois keys loaded from disk.\n" : "Galois key generated from steps vector.\n");
 
     bootstrapper.slot_vec.push_back(logn);
 

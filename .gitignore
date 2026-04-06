@@ -6,3 +6,13 @@ data/
 build/
 results.csv
 single_layer_results.csv
+
+# Local CMake build tree: generated keys (relin/galois/*.bin), manifests, copied weights/*.txt, CMake cache
+build-genkeys/
+
+# Key packs at repo root (moai_gen_keys output); keep docs if you add e.g. keys/README.md
+/keys/**
+!/keys/README.md
+
+# Binary FHE key / ciphertext dumps (not used as tracked assets in this repo)
+*.bin
