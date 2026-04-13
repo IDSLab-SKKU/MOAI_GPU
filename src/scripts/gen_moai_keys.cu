@@ -6,6 +6,7 @@
  *   base_output_dir — parent directory (default: "keys" relative to cwd)
  *   alpha           — special modulus size (default: 1). Must divide T = |coeff_modulus|;
  *                     dnum = (T - alpha) / alpha. Output: base_output_dir/keys_dnum_<dnum>/.
+ *                     Example: T=40 and alpha=4 -> dnum=9 (match MOAI_ALPHA=4 for single_layer_test).
  *
  * Format (see keys/README.md):
  *   secret_key.bin     — coeff_mod_size * N uint64 (NTT form), row-major
@@ -63,7 +64,8 @@ static void write_manifest(const std::string &path, const std::string &text) {
     out << text;
 }
 
-/** Same CKKS parameter recipe as `test_single_layer.cuh` → `single_layer_test()`. */
+/** Same CKKS parameter recipe as `test_single_layer.cuh` → `single_layer_test()`.
+ *  Keep remaining_level / boot_level / coeff_bit_vec in lockstep when either file changes. */
 static EncryptionParameters make_moai_inference_parms(size_t alpha) {
     long logN = 16;
     long logn = 15;
@@ -75,7 +77,7 @@ static EncryptionParameters make_moai_inference_parms(size_t alpha) {
 
     int secret_key_hamming_weight = 192;
 
-    int remaining_level = 20;
+    int remaining_level = 24;  // must match single_layer_test() (test_single_layer.cuh)
     int boot_level = 14;
     std::vector<int> coeff_bit_vec;
     coeff_bit_vec.push_back(logq);

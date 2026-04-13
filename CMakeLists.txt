@@ -100,6 +100,16 @@ add_executable(moai_gen_keys src/scripts/gen_moai_keys.cu ${PHANTOM_FHE_SRC})
 
 find_package(OpenMP REQUIRED)
 
+# NVTX (Nsight Systems ranges) for micro-bench profiling — optional if CUDA toolkit lacks nvtx3.
+find_package(CUDAToolkit QUIET)
+if(TARGET CUDA::nvtx3)
+  target_link_libraries(test PRIVATE CUDA::nvtx3)
+  target_compile_definitions(test PRIVATE MOAI_HAVE_NVTX=1)
+  message(STATUS "NVTX: linked CUDA::nvtx3 for profiling ranges")
+else()
+  message(STATUS "NVTX: CUDA::nvtx3 not found — ct_pt NVTX ranges disabled (nsys still works)")
+endif()
+
 target_link_libraries(test PRIVATE OpenMP::OpenMP_CXX)
 
 target_compile_options(test PRIVATE

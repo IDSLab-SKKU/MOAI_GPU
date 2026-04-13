@@ -1,0 +1,3 @@
+run	mode	exit_code	wall_sec	boot_sec	ct_ct_colpack_sec	ct_ct_diag_sec
+1	boot	0	91	0.774002		
+2	ct_ct	0	31		25.3095	4.47491

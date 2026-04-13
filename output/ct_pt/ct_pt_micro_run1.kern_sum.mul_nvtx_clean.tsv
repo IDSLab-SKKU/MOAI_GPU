@@ -1,0 +1,13 @@
+Name	ShortName	Time (%)	Total Time (ns)	Instances	Avg (ns)
+inplace_special_ifft_base_kernel(double2 *, const double2 *, const unsigned int *, unsigned int, unsigned int, unsigned int, int, unsigned int, unsigned int, double)	inplace_special_ifft_base_kernel	38.3	5142089486	49152	104616.1
+inplace_special_ifft_iter_kernel(double2 *, const double2 *, const unsigned int *, unsigned int, unsigned int, unsigned int, int, unsigned int, unsigned int, double)	inplace_special_ifft_iter_kernel	14.5	1947507206	196608	9905.5
+inplace_fnwt_radix8_phase2(unsigned long *, const unsigned long *, const unsigned long *, const DModulus *, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long)	inplace_fnwt_radix8_phase2	10.6	1421515854	49280	28845.7
+multiply_rns_poly(const unsigned long *, const unsigned long *, const DModulus *, unsigned long *, unsigned long, unsigned long)	multiply_rns_poly	10.3	1378789030	98304	14025.8
+add_rns_poly(const unsigned long *, const unsigned long *, const DModulus *, unsigned long *, unsigned long, unsigned long)	add_rns_poly	9.8	1311326219	98176	13356.9
+inplace_fnwt_radix8_phase1(unsigned long *, const unsigned long *, const unsigned long *, const DModulus *, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long)	inplace_fnwt_radix8_phase1	9.2	1241991756	49280	25202.8
+phantom::arith::decompose_array_uint64(unsigned long *, const double2 *, const DModulus *, unsigned int, unsigned int, unsigned int)	phantom::arith::decompose_array_uint64	5.6	755723599	49152	15375.2
+bit_reverse_and_zero_padding(double2 *, double2 *, unsigned long, unsigned int, unsigned int)	bit_reverse_and_zero_padding	1.7	231826003	49152	4716.5
+inplace_inwt_radix8_phase1(unsigned long *, const unsigned long *, const unsigned long *, const DModulus *, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long)	inplace_inwt_radix8_phase1	0.0	2639255	128	20619.2
+inplace_inwt_radix8_phase2(unsigned long *, const unsigned long *, const unsigned long *, const unsigned long *, const unsigned long *, const DModulus *, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long)	inplace_inwt_radix8_phase2	0.0	1890183	128	14767.1
+phantom::divide_and_round_ntt_inv_scalar_kernel(unsigned long *, const unsigned long *, const DModulus *, const unsigned long *, const unsigned long *, unsigned long, unsigned long)	phantom::divide_and_round_ntt_inv_scalar_kernel	0.0	1769997	128	13828.1
+phantom::divide_and_round_reduce_q_last_kernel(unsigned long *, const unsigned long *, const DModulus *, unsigned long, unsigned long)	phantom::divide_and_round_reduce_q_last_kernel	0.0	1597671	128	12481.8

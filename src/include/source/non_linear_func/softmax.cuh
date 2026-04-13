@@ -210,12 +210,8 @@ vector<PhantomCiphertext> softmax(vector<PhantomCiphertext> &enc_X, vector<int> 
     stream_pool.reserve(nthreads);
     for (size_t i = stream_pool.size(); i < static_cast<size_t>(nthreads); ++i)
     {
-      stream_pool.emplace_back(); 
+      stream_pool.emplace_back();
     }
-  }
-  if (nthreads == 1)
-  {
-    stream_pool[0] = *phantom::util::global_variables::default_stream;
   }
 
   // #pragma omp parallel for
@@ -226,7 +222,7 @@ vector<PhantomCiphertext> softmax(vector<PhantomCiphertext> &enc_X, vector<int> 
     moai::Evaluator evaluator_local(&context, &phantom_encoder_local);
 
     const int tid = omp_get_thread_num();
-    auto &stream = stream_pool[tid]; 
+    auto &stream = stream_pool[tid];
 
 #pragma omp for schedule(static)
     for (int i = 0; i < num; ++i)
@@ -585,10 +581,6 @@ vector<PhantomCiphertext> softmax_boot(vector<PhantomCiphertext> &enc_X, vector<
     {
       stream_pool.emplace_back();
     }
-  }
-  if (nthreads == 1)
-  {
-    stream_pool[0] = *phantom::util::global_variables::default_stream;
   }
 
   // #pragma omp parallel for

@@ -58,9 +58,34 @@ namespace phantom::util
             cudaStreamCreateWithFlags(&stream, cudaStreamNonBlocking);
         }
 
+        cuda_stream_wrapper(const cuda_stream_wrapper &) = delete;
+        cuda_stream_wrapper &operator=(const cuda_stream_wrapper &) = delete;
+
+        cuda_stream_wrapper(cuda_stream_wrapper &&other) noexcept : stream(other.stream)
+        {
+            other.stream = nullptr;
+        }
+
+        cuda_stream_wrapper &operator=(cuda_stream_wrapper &&other) noexcept
+        {
+            if (this != &other)
+            {
+                if (stream != nullptr)
+                {
+                    cudaStreamDestroy(stream);
+                }
+                stream = other.stream;
+                other.stream = nullptr;
+            }
+            return *this;
+        }
+
         ~cuda_stream_wrapper()
         {
-            cudaStreamDestroy(stream);
+            if (stream != nullptr)
+            {
+                cudaStreamDestroy(stream);
+            }
         }
 
         [[nodiscard]] auto &get_stream() const

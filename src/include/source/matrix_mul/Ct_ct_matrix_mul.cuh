@@ -1,5 +1,7 @@
 #include "include.cuh"
 
+#include <cstdlib>
+
 using namespace std;
 using namespace std::chrono;
 using namespace phantom::util;
@@ -20,7 +22,15 @@ vector<PhantomCiphertext> ct_ct_matrix_mul_colpacking(vector<PhantomCiphertext> 
   }
 
   const int max_threads = omp_get_max_threads();
-  const int nthreads = std::max(1, std::min(max_threads, row_X));
+  int row_cap = row_X;
+  if (const char *ev = std::getenv("MOAI_CT_CT_COLPACK_MAX_THREADS")) {
+    char *end = nullptr;
+    long v = std::strtol(ev, &end, 10);
+    if (end != ev && *end == '\0' && v >= 1 && v <= 1024) {
+      row_cap = std::min(row_cap, static_cast<int>(v));
+    }
+  }
+  const int nthreads = std::max(1, std::min(max_threads, row_cap));
 
   if (stream_pool.size() < static_cast<size_t>(nthreads))
   {
@@ -29,10 +39,6 @@ vector<PhantomCiphertext> ct_ct_matrix_mul_colpacking(vector<PhantomCiphertext> 
     {
       stream_pool.emplace_back();
     }
-  }
-  if (nthreads == 1)
-  {
-    stream_pool[0] = *phantom::util::global_variables::default_stream;
   }
 
   // cudaEvent_t ev_start, ev_stop;
@@ -168,10 +174,6 @@ vector<PhantomCiphertext> ct_ct_matrix_mul_diagpacking(vector<PhantomCiphertext>
     {
       stream_pool.emplace_back();
     }
-  }
-  if (nthreads == 1)
-  {
-    stream_pool[0] = *phantom::util::global_variables::default_stream;
   }
 
   // PhantomCKKSEncoder phantom_encoder(context);

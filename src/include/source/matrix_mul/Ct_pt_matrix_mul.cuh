@@ -64,10 +64,6 @@ inline vector<PhantomCiphertext> ct_pt_matrix_mul_wo_pre(
       stream_pool.emplace_back();
     }
   }
-  if (nthreads == 1)
-  {
-    stream_pool[0] = *phantom::util::global_variables::default_stream;
-  }
 
   vector<double> time(col_W, 0.0);
 
@@ -427,10 +423,6 @@ vector<PhantomCiphertext> ct_pt_matrix_mul(vector<PhantomCiphertext> &enc_X,
     {
       stream_pool.emplace_back();
     }
-  }
-  if (nthreads == 1)
-  {
-    stream_pool[0] = *phantom::util::global_variables::default_stream;
   }
 
   cudaEvent_t ev_start, ev_stop;

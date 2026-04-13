@@ -57,7 +57,6 @@ public:
     /** Load pk from host (2 * coeff_modulus_size * N uint64, NTT), e.g. moai_gen_keys public_key.bin. */
     void load_public_key_from_host_ntt(const PhantomContext &context, const uint64_t *host, size_t word_count,
                                        const cudaStream_t &stream);
-
     PhantomPublicKey() = default;
 
     PhantomPublicKey(const PhantomPublicKey &) = delete;

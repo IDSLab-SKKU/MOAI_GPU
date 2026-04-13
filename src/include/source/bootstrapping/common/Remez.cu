@@ -388,15 +388,11 @@ void Remez::getextreme() {
   }
   long* local_extreme_count_array = new long[2 * boundary_K - 1];
 
-  vector<thread> vec_thr;
-
+  // Sequential: NTL RR transcendentals often use PARI/GP, which is not safe to call
+  // concurrently from multiple threads (can abort with "cos: ... argument too large").
   for (int i = 0; i < 2 * boundary_K - 1; i++) {
-    vec_thr.emplace_back(&Remez::getextreme_local, this, local_extreme_point_array[i], ref(local_extreme_count_array[i]), i - boundary_K + 1);
-    // getextreme_local(local_extreme_point_array[i], local_extreme_count_array[i], i - boundary_K + 1);
+    getextreme_local(local_extreme_point_array[i], local_extreme_count_array[i], i - boundary_K + 1);
   }
-
-  for (auto& t : vec_thr)
-    t.join();
 
   extreme_count = 0;
   for (int i = 0; i < 2 * boundary_K - 1; i++) {

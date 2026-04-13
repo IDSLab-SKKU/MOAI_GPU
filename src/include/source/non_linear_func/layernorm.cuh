@@ -6,6 +6,20 @@ using namespace phantom::util;
 using namespace phantom::arith;
 using namespace moai;
 
+// Forward declaration; LayerNorm only needs a pointer.
+class Bootstrapper;
+
+// Overload declarations (must appear before wrappers that call them).
+vector<PhantomCiphertext> layernorm(const vector<PhantomCiphertext> &x, const vector<double> &gamma, const vector<double> &beta,
+                                    const vector<int> &bias_vec, PhantomContext &context, PhantomRelinKey &relin_keys,
+                                    PhantomSecretKey &sk, Bootstrapper *bootstrapper, bool bootstrap_var_branch,
+                                    double *internal_bootstrap_time_s);
+
+vector<PhantomCiphertext> layernorm2(vector<PhantomCiphertext> &x, vector<double> &gamma, vector<double> &beta,
+                                     const vector<int> &bias_vec, PhantomContext &context, PhantomRelinKey &relin_keys,
+                                     PhantomSecretKey &sk, Bootstrapper *bootstrapper, bool bootstrap_var_branch,
+                                     double *internal_bootstrap_time_s);
+
 // PhantomCiphertext evalLine(PhantomCiphertext x, PhantomPlaintext m, PhantomPlaintext c, PhantomContext &context)
 // {
 //   PhantomCKKSEncoder encoder(context);
@@ -857,8 +871,18 @@ PhantomCiphertext invert_sqrt(PhantomCiphertext x, int d_newt, int d_gold,
 vector<PhantomCiphertext> layernorm(const vector<PhantomCiphertext> &x, const vector<double> &gamma, const vector<double> &beta, const vector<int> &bias_vec,
                                     PhantomContext &context, PhantomRelinKey &relin_keys, PhantomSecretKey &sk)
 {
-  // algorithm may be different for different data range
-  // depth need = 20 (current version)
+                             
+  return layernorm(x, gamma, beta, bias_vec, context, relin_keys, sk, nullptr, false, nullptr);
+}
+
+vector<PhantomCiphertext> layernorm(const vector<PhantomCiphertext> &x, const vector<double> &gamma, const vector<double> &beta, const vector<int> &bias_vec,
+                                    PhantomContext &context, PhantomRelinKey &relin_keys, PhantomSecretKey &sk,
+                                    Bootstrapper *bootstrapper, bool bootstrap_var_branch, double *internal_bootstrap_time_s)
+{
+  if (internal_bootstrap_time_s) {
+    *internal_bootstrap_time_s = 0.0;
+  }
+
   PhantomCKKSEncoder phantom_encoder(context);
 
   Encoder encoder(&context, &phantom_encoder);
@@ -901,7 +925,7 @@ vector<PhantomCiphertext> layernorm(const vector<PhantomCiphertext> &x, const ve
     cout <<endl;
 
   */
-  // compute nx_0,...,nx_n
+  // Prepare Enc(d) where d=768 on the same level as x[0]
   PhantomPlaintext d;
   vector<double> ecd_n(slot_count, 0);
   for (int i = 0; i < slot_count; ++i)
@@ -912,62 +936,35 @@ vector<PhantomCiphertext> layernorm(const vector<PhantomCiphertext> &x, const ve
     }
   }
   encoder.encode(ecd_n, x[0].params_id(), x[0].scale(), d);
-  vector<PhantomCiphertext> nx(num_ct);
 
-  // #pragma omp parallel for
-  for (int i = 0; i < num_ct; ++i)
-  {
-    nx[i] = x[i];
-    evaluator.multiply_plain_inplace(nx[i], d);
-    evaluator.rescale_to_next_inplace(nx[i]);
-    nx[i].scale() = scale;
-  }
+  // compute var = sum_i (d*x_i - ave_x)^2 / d^2
+  // Do not store all centered ciphertexts; compute-and-accumulate.
+  PhantomCiphertext ave_x_ms;
+  bool ave_x_ms_init = false;
 
-  //  cout <<"Modulus chain index for nx1: "<<
-  //    seal_context.get_context_data(nx[1].parms_id())->params_id()<<endl;
-
-  /*
-    cout <<"  decrypt of nx: "<<endl;
-    for (int i = 0; i < num_ct; ++i){
-      decryptor.decrypt(nx[i], plain_result);
-
-      encoder.decode(plain_result, result);
-      cout <<i<<"-th: ";
-      for (int ind = 0 ; ind < slot_count ; ++ind){
-        if(bias_vec[ind] == 1){
-            cout <<result[ind]<<" ";
-        }
-      }
-    cout <<endl;
-    }
-  */
-  // compute var=((nx0-u)^2+...+(nx768-u)^2)/n^2
-  // Ciphertext var = nx[0];
-  evaluator.mod_switch_to_inplace(ave_x, nx[0].params_id());
-  // cout <<"var scale = "<<log2(var.scale())<<", ave scale = "<<log2(ave_x.scale())<<endl;
-  // var.scale()=scale;
-  ave_x.scale() = scale;
-  // evaluator.sub_inplace(var,ave_x);
-  // evaluator.square_inplace(var);
-  // evaluator.relinearize_inplace(var,relin_keys);
-  // evaluator.rescale_to_next_inplace(var);
-
-  // 768 = 48*16, designed for multi-thread
   vector<PhantomCiphertext> temp_var(48);
-
-  // #pragma omp parallel for
-  for (int i = 0; i < 48; ++i)
+  for (int bi = 0; bi < 48; ++bi)
   {
     PhantomCiphertext temp_i;
-    for (int j = 0; j < 16; ++j)
+    for (int bj = 0; bj < 16; ++bj)
     {
-      // cout <<i<<" ";
-      PhantomCiphertext temp = nx[i * 16 + j];
-      evaluator.sub_inplace(temp, ave_x);
+      const int idx = bi * 16 + bj;
+      PhantomCiphertext temp = x[idx];
+      evaluator.multiply_plain_inplace(temp, d);
+      evaluator.rescale_to_next_inplace(temp);
+      temp.scale() = scale;
+
+      if (!ave_x_ms_init)
+      {
+        ave_x_ms = ave_x;
+        evaluator.mod_switch_to_inplace(ave_x_ms, temp.params_id());
+        ave_x_ms.scale() = scale;
+        ave_x_ms_init = true;
+      }
+
+      evaluator.sub_inplace(temp, ave_x_ms);
       evaluator.square_inplace(temp);
-      // evaluator.relinearize_inplace(temp,relin_keys);
-      // evaluator.rescale_to_next_inplace(temp);
-      if (j == 0)
+      if (bj == 0)
       {
         temp_i = temp;
       }
@@ -976,7 +973,7 @@ vector<PhantomCiphertext> layernorm(const vector<PhantomCiphertext> &x, const ve
         evaluator.add_inplace(temp_i, temp);
       }
     }
-    temp_var[i] = temp_i;
+    temp_var[bi] = temp_i;
   }
 
   PhantomCiphertext var = temp_var[0];
@@ -1029,6 +1026,30 @@ vector<PhantomCiphertext> layernorm(const vector<PhantomCiphertext> &x, const ve
     }
     cout <<endl;
   */
+  // Optional: bootstrap variance branch (single ciphertext) before inverse sqrt.
+  if (bootstrap_var_branch && bootstrapper != nullptr)
+  {
+    struct timeval tstart_bs, tend_bs;
+    gettimeofday(&tstart_bs, NULL);
+
+    PhantomCiphertext var_in = var;
+    while (context.get_context_data(var_in.params_id()).chain_depth() != 0)
+    {
+      evaluator.mod_switch_to_next_inplace(var_in);
+    }
+
+    PhantomCiphertext var_boot;
+    bootstrapper->bootstrap_3(var_boot, var_in);
+    var = std::move(var_boot);
+
+    gettimeofday(&tend_bs, NULL);
+    if (internal_bootstrap_time_s)
+    {
+      *internal_bootstrap_time_s =
+          tend_bs.tv_sec - tstart_bs.tv_sec + (tend_bs.tv_usec - tstart_bs.tv_usec) / 1000000.0;
+    }
+  }
+
   // compute 1/sqrt(var)
   PhantomCiphertext inv_sqrt_var = invert_sqrt(var, 4, 2, context, relin_keys);
 
@@ -1048,15 +1069,20 @@ vector<PhantomCiphertext> layernorm(const vector<PhantomCiphertext> &x, const ve
 */
   // compute Gamma/sqrt(n)*(nxi-u)*inv+beta
   vector<PhantomCiphertext> output(num_ct);
-  evaluator.mod_switch_to_inplace(ave_x, inv_sqrt_var.params_id());
+  PhantomCiphertext ave_x_out = ave_x;
+  evaluator.mod_switch_to_inplace(ave_x_out, inv_sqrt_var.params_id());
+  ave_x_out.scale() = scale;
 
   // #pragma omp parallel for
   for (int i = 0; i < num_ct; ++i)
   {
     // cout<<i<<" ";
-    output[i] = nx[i];
+    output[i] = x[i];
+    evaluator.multiply_plain_inplace(output[i], d);
+    evaluator.rescale_to_next_inplace(output[i]);
+    output[i].scale() = scale;
     evaluator.mod_switch_to_inplace(output[i], inv_sqrt_var.params_id());
-    evaluator.sub_inplace(output[i], ave_x);
+    evaluator.sub_inplace(output[i], ave_x_out);
     evaluator.multiply_inplace(output[i], inv_sqrt_var);
     evaluator.relinearize_inplace(output[i], relin_keys);
     evaluator.rescale_to_next_inplace(output[i]);
@@ -1093,6 +1119,17 @@ vector<PhantomCiphertext> layernorm(const vector<PhantomCiphertext> &x, const ve
 vector<PhantomCiphertext> layernorm2(vector<PhantomCiphertext> &x, vector<double> &gamma, vector<double> &beta, const vector<int> &bias_vec,
                                      PhantomContext &context, PhantomRelinKey &relin_keys, PhantomSecretKey &sk)
 {
+  return layernorm2(x, gamma, beta, bias_vec, context, relin_keys, sk, nullptr, false, nullptr);
+}
+
+vector<PhantomCiphertext> layernorm2(vector<PhantomCiphertext> &x, vector<double> &gamma, vector<double> &beta, const vector<int> &bias_vec,
+                                     PhantomContext &context, PhantomRelinKey &relin_keys, PhantomSecretKey &sk,
+                                     Bootstrapper *bootstrapper, bool bootstrap_var_branch, double *internal_bootstrap_time_s)
+{
+  if (internal_bootstrap_time_s) {
+    *internal_bootstrap_time_s = 0.0;
+  }
+
   // algorithm may be different for different data range
   // depth need = 20 (current version)
   PhantomCKKSEncoder phantom_encoder(context);
@@ -1136,7 +1173,7 @@ vector<PhantomCiphertext> layernorm2(vector<PhantomCiphertext> &x, vector<double
     cout <<endl;
   */
 
-  // compute nx_0,...,nx_n
+  // Prepare Enc(d) where d=768 on the same level as x[0]
   PhantomPlaintext d;
   vector<double> ecd_n(slot_count, 0);
   for (int i = 0; i < slot_count; ++i)
@@ -1147,64 +1184,34 @@ vector<PhantomCiphertext> layernorm2(vector<PhantomCiphertext> &x, vector<double
     }
   }
   encoder.encode(ecd_n, x[0].params_id(), x[0].scale(), d);
-  vector<PhantomCiphertext> nx(num_ct);
 
-  // #pragma omp parallel for
+  // compute var = sum_i (d*x_i - ave_x)^2 / d^3 (this matches the existing layernorm2 scaling)
+  PhantomCiphertext ave_x_ms;
+  bool ave_x_ms_init = false;
 
-  for (int i = 0; i < num_ct; ++i)
-  {
-    nx[i] = x[i];
-    evaluator.multiply_plain_inplace(nx[i], d);
-    evaluator.rescale_to_next_inplace(nx[i]);
-    nx[i].scale() = scale;
-  }
-
-  //  cout <<"Modulus chain index for nx1: "<<
-  //    seal_context.get_context_data(nx[1].parms_id())->params_id()<<endl;
-
-  /*
-    cout <<"  decrypt of nx: "<<endl;
-    for (int i = 0; i < num_ct; ++i){
-      decryptor.decrypt(nx[i], plain_result);
-
-      encoder.decode(plain_result, result);
-      cout <<i<<"-th: ";
-      for (int ind = 0 ; ind < slot_count ; ++ind){
-        if(bias_vec[ind] == 1){
-            cout <<result[ind]<<" ";
-        }
-      }
-    cout <<endl;
-    }
-  */
-  // compute var=((nx0-u)^2+...+(nx768-u)^2)/n^2
-  // Ciphertext var = nx[0];
-  evaluator.mod_switch_to_inplace(ave_x, nx[0].params_id());
-  // cout <<"var scale = "<<log2(var.scale())<<", ave scale = "<<log2(ave_x.scale())<<endl;
-  // var.scale()=scale;
-  ave_x.scale() = scale;
-  // evaluator.sub_inplace(var,ave_x);
-  // evaluator.square_inplace(var);
-  // evaluator.relinearize_inplace(var,relin_keys);
-  // evaluator.rescale_to_next_inplace(var);
-
-  // 768 = 48*16, designed for multi-thread
   vector<PhantomCiphertext> temp_var(48);
-
-  // #pragma omp parallel for
-
-  for (int i = 0; i < 48; ++i)
+  for (int bi = 0; bi < 48; ++bi)
   {
     PhantomCiphertext temp_i;
-    for (int j = 0; j < 16; ++j)
+    for (int bj = 0; bj < 16; ++bj)
     {
-      // cout <<i<<" ";
-      PhantomCiphertext temp = nx[i * 16 + j];
-      evaluator.sub_inplace(temp, ave_x);
+      const int idx = bi * 16 + bj;
+      PhantomCiphertext temp = x[idx];
+      evaluator.multiply_plain_inplace(temp, d);
+      evaluator.rescale_to_next_inplace(temp);
+      temp.scale() = scale;
+
+      if (!ave_x_ms_init)
+      {
+        ave_x_ms = ave_x;
+        evaluator.mod_switch_to_inplace(ave_x_ms, temp.params_id());
+        ave_x_ms.scale() = scale;
+        ave_x_ms_init = true;
+      }
+
+      evaluator.sub_inplace(temp, ave_x_ms);
       evaluator.square_inplace(temp);
-      // evaluator.relinearize_inplace(temp,relin_keys);
-      // evaluator.rescale_to_next_inplace(temp);
-      if (j == 0)
+      if (bj == 0)
       {
         temp_i = temp;
       }
@@ -1213,7 +1220,7 @@ vector<PhantomCiphertext> layernorm2(vector<PhantomCiphertext> &x, vector<double
         evaluator.add_inplace(temp_i, temp);
       }
     }
-    temp_var[i] = temp_i;
+    temp_var[bi] = temp_i;
   }
 
   PhantomCiphertext var = temp_var[0];
@@ -1252,6 +1259,30 @@ vector<PhantomCiphertext> layernorm2(vector<PhantomCiphertext> &x, vector<double
     }
     cout <<endl;
   */
+  // Optional: bootstrap variance branch (single ciphertext) before inverse sqrt.
+  if (bootstrap_var_branch && bootstrapper != nullptr)
+  {
+    struct timeval tstart_bs, tend_bs;
+    gettimeofday(&tstart_bs, NULL);
+
+    PhantomCiphertext var_in = var;
+    while (context.get_context_data(var_in.params_id()).chain_depth() != 0)
+    {
+      evaluator.mod_switch_to_next_inplace(var_in);
+    }
+
+    PhantomCiphertext var_boot;
+    bootstrapper->bootstrap_3(var_boot, var_in);
+    var = std::move(var_boot);
+
+    gettimeofday(&tend_bs, NULL);
+    if (internal_bootstrap_time_s)
+    {
+      *internal_bootstrap_time_s =
+          tend_bs.tv_sec - tstart_bs.tv_sec + (tend_bs.tv_usec - tstart_bs.tv_usec) / 1000000.0;
+    }
+  }
+
   // compute 1/sqrt(var)
   PhantomCiphertext inv_sqrt_var = invert_sqrt(var, 4, 2, context, relin_keys);
   /*
@@ -1271,16 +1302,21 @@ vector<PhantomCiphertext> layernorm2(vector<PhantomCiphertext> &x, vector<double
   */
   // compute Gamma/sqrt(n)*(nxi-u)*inv+beta
   vector<PhantomCiphertext> output(num_ct);
-  evaluator.mod_switch_to_inplace(ave_x, inv_sqrt_var.params_id());
+  PhantomCiphertext ave_x_out = ave_x;
+  evaluator.mod_switch_to_inplace(ave_x_out, inv_sqrt_var.params_id());
+  ave_x_out.scale() = scale;
 
   // #pragma omp parallel for
 
   for (int i = 0; i < num_ct; ++i)
   {
     // cout<<i<<" ";
-    output[i] = nx[i];
+    output[i] = x[i];
+    evaluator.multiply_plain_inplace(output[i], d);
+    evaluator.rescale_to_next_inplace(output[i]);
+    output[i].scale() = scale;
     evaluator.mod_switch_to_inplace(output[i], inv_sqrt_var.params_id());
-    evaluator.sub_inplace(output[i], ave_x);
+    evaluator.sub_inplace(output[i], ave_x_out);
     evaluator.multiply_inplace(output[i], inv_sqrt_var);
     evaluator.relinearize_inplace(output[i], relin_keys);
     evaluator.rescale_to_next_inplace(output[i]);

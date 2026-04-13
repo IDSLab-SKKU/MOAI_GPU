@@ -1,5 +1,9 @@
 #include "include.cuh"
 
+#if defined(MOAI_HAVE_NVTX)
+#include <nvtx3/nvToolsExt.h>
+#endif
+
 using namespace std;
 using namespace phantom;
 using namespace moai;
@@ -116,7 +120,14 @@ void ct_pt_matrix_mul_test()
     //  gettimeofday(&tstart1,NULL);
     std::chrono::_V2::system_clock::time_point start = high_resolution_clock::now();
     cudaDeviceSynchronize();
+#if defined(MOAI_HAVE_NVTX)
+    nvtxRangePushA("moai:ct_pt_matrix_mul_wo_pre");
+#endif
     vector<PhantomCiphertext> ct_pt_mul = ct_pt_matrix_mul_wo_pre(enc_ecd_x, W, num_col, col_W, num_col, context);
+#if defined(MOAI_HAVE_NVTX)
+    cudaDeviceSynchronize();
+    nvtxRangePop();
+#endif
 
     // gettimeofday(&tend1,NULL);
     // double ct_pt_matrix_mul_time = tend1.tv_sec-tstart1.tv_sec+(tend1.tv_usec-tstart1.tv_usec)/1000000.0;

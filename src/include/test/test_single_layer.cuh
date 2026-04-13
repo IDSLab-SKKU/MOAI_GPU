@@ -363,6 +363,21 @@ void single_layer_test()
 {
     cout << "Task: test one layer of BERT in CKKS scheme: " << endl;
 
+    // LN bootstrapping placement variants:
+    // 0: baseline (keep pre-LN 768-ct bootstrapping)
+    // 1: remove pre-LN bootstrapping; do internal LN var-branch bootstrapping (1 ct)
+    // 2: same as 1 + allow attention start depth bump via MOAI_LN_LEVEL_BUMP
+    int moai_ln_bootstrap_variant = 0;
+    if (const char *ev = std::getenv("MOAI_LN_BOOTSTRAP_VARIANT")) {
+        char *end = nullptr;
+        long v = std::strtol(ev, &end, 10);
+        if (end != ev && *end == '\0' && v >= 0 && v <= 2) {
+            moai_ln_bootstrap_variant = static_cast<int>(v);
+        }
+    }
+    const bool moai_ln_enable_internal_var_bootstrap = (moai_ln_bootstrap_variant >= 1);
+    const bool moai_ln_disable_preln_bootstrap = (moai_ln_bootstrap_variant >= 1);
+
     read_input();
     read_weights();
     read_bias();
@@ -388,10 +403,11 @@ void single_layer_test()
     int secret_key_hamming_weight = 192;
 
     // Calculation required
-    int remaining_level_att = 15;
     int boot_level = 14; // >= subsum 1 + coefftoslot 2 + ModReduction 9 + slottocoeff 2
-    int total_level_att = remaining_level_att + boot_level;
+    // remaining_level_att set after MOAI_ALPHA (must satisfy pre-attention mod-switch budget; see below)
 
+    // Total primes T = 1 + remaining_level + boot_level + 1.
+    // Original MOAI single-layer recipe uses remaining_level=20 (T=36 when boot_level=14).
     int remaining_level = 20;
     int total_level = remaining_level + boot_level;
 
@@ -429,6 +445,62 @@ void single_layer_test()
         }
     }
 
+    // Pre-attention mod switches: N_used = 2*boot_level + (remaining_level - remaining_level_att) + 1.
+    // Need N_used <= max_drops (tops - first_index). Tight equality leaves no room for QKV/rescale inside
+    // single_att_block; for MOAI_ALPHA>1 add a small slack via higher remaining_level_att.
+    // Match the original recipe (remaining_level=20): slack 0 (alpha==1) or 2 (alpha>1).
+    const int att_chain_slack = (moai_hybrid_alpha > 1) ? 2 : 0;
+    int remaining_level_att = boot_level + static_cast<int>(moai_hybrid_alpha) + att_chain_slack;
+    // Variant2: bump attention start depth by reducing pre-attention mod-switches.
+    // Starting depth before attention is approximately (remaining_level_att - 1) due to an extra mod_switch_to_next.
+    if (moai_ln_bootstrap_variant == 2) {
+        int bump = 0;
+        if (const char *ev = std::getenv("MOAI_LN_LEVEL_BUMP")) {
+            char *end = nullptr;
+            long v = std::strtol(ev, &end, 10);
+            if (end != ev && *end == '\0' && v >= 0 && v <= 16) {
+                bump = static_cast<int>(v);
+            }
+        }
+        const int old_att = remaining_level_att;
+        remaining_level_att = std::min(remaining_level, remaining_level_att + bump);
+        const int applied = remaining_level_att - old_att;
+        cout << "MOAI LN Variant2: attention start depth bump requested=" << bump
+             << " applied=" << applied << " (remaining_level_att=" << remaining_level_att
+             << ", start_depth≈" << (remaining_level_att - 1) << ")." << endl;
+        if (applied < bump) {
+            cout << "MOAI LN Variant2: bump capped by remaining_level=" << remaining_level
+                 << " (increase remaining_level in code if you need more headroom without changing start depth math)." << endl;
+        }
+    }
+    if (remaining_level_att > remaining_level) {
+        throw std::invalid_argument(
+            "single_layer: remaining_level_att > remaining_level (reduce MOAI_ALPHA or att_chain_slack)");
+    }
+    const int total_level_att = remaining_level_att + boot_level;
+
+    // Pre-attention modulus switching control (for enc_ecd_x path only).
+    // Default drops match original recipe: boot_level + (remaining_level - remaining_level_att) + 1.
+    // You can override with:
+    // - MOAI_PRE_ATT_DROPS: absolute number of mod_switch_to_next drops applied to enc_ecd_x before attention
+    // - MOAI_PRE_ATT_DROPS_DELTA: additive adjustment to the default (can be negative)
+    int pre_att_drops = boot_level + (remaining_level - remaining_level_att) + 1;
+    if (const char *ev = std::getenv("MOAI_PRE_ATT_DROPS")) {
+        char *end = nullptr;
+        long v = std::strtol(ev, &end, 10);
+        if (end != ev && *end == '\0') {
+            pre_att_drops = std::max(0, static_cast<int>(v));
+        }
+    } else if (const char *ev = std::getenv("MOAI_PRE_ATT_DROPS_DELTA")) {
+        char *end = nullptr;
+        long v = std::strtol(ev, &end, 10);
+        if (end != ev && *end == '\0') {
+            pre_att_drops = std::max(0, pre_att_drops + static_cast<int>(v));
+        }
+    }
+
+    // Keys must match parms (same T and MOAI_ALPHA). E.g. MOAI_ALPHA=4, T=40 -> dnum=9 -> .../keys_dnum_9
+    // (generate with gen_moai_keys / make_moai_inference_parms(4)).
     std::string moai_key_pack_dir;
     if (const char *p = std::getenv("MOAI_PRECOMPUTED_KEYS_DIR")) {
         if (*p) {
@@ -447,6 +519,27 @@ void single_layer_test()
     // double scale = pow(2.0,40);
 
     PhantomContext context(parms);
+
+    {
+        const size_t first = context.get_first_index();
+        const size_t tops = context.get_context_data(first).parms().coeff_modulus().size();
+        const size_t max_drops = tops - first;
+        // Total pre-attention mod-switches include:
+        // - enc_ecd_x_copy: boot_level drops
+        // - enc_ecd_x: pre_att_drops drops (configurable via env vars above)
+        const int pre_att_mod_switch = boot_level + pre_att_drops;
+        if (static_cast<size_t>(pre_att_mod_switch) > max_drops) {
+            throw std::invalid_argument(
+                "single_layer: pre-attention mod_switch count exceeds chain budget (adjust MOAI_ALPHA, "
+                "boot_level, or remaining_level/remaining_level_att)");
+        }
+        if (max_drops - static_cast<size_t>(pre_att_mod_switch) < 3) {
+            cout << "single_layer: warning: pre-attention mod_switch budget has little slack (pre_att="
+                 << pre_att_mod_switch << ", max_drops=" << max_drops
+                 << "). If attention fails, increase remaining_level in steps of MOAI_ALPHA while keeping "
+                    "T % MOAI_ALPHA == 0; sync gen_moai_keys.cu make_moai_inference_parms.\n";
+        }
+    }
 
     cout << "Set encryption parameters and print" << endl;
     print_parameters(context);
@@ -598,26 +691,40 @@ void single_layer_test()
         }
     }
 
-    // mod switch to remaining level
-    // #pragma omp parallel for
-
+    // Pre-attention mod-switch drops (configurable via MOAI_PRE_ATT_DROPS / MOAI_PRE_ATT_DROPS_DELTA).
     for (int i = 0; i < num_col; ++i)
     {
-        for (int j = 0; j < boot_level + (remaining_level - remaining_level_att); ++j)
+        for (int j = 0; j < pre_att_drops; ++j)
         {
             evaluator.mod_switch_to_next_inplace(enc_ecd_x[i]);
         }
     }
 
-    // mod switch to next level
-    // #pragma omp parallel for
-
-    for (int i = 0; i < num_col; ++i)
-    {
-        evaluator.mod_switch_to_next_inplace(enc_ecd_x[i]);
+    // Debug: report remaining depth right before attention.
+    const bool moai_depth_debug = (std::getenv("MOAI_DEPTH_DEBUG") != nullptr);
+    if (moai_depth_debug) {
+        size_t min_depth = context.get_context_data(enc_ecd_x[0].params_id()).chain_depth();
+        size_t max_depth = min_depth;
+        for (int i = 1; i < num_col; ++i) {
+            const size_t d = context.get_context_data(enc_ecd_x[i].params_id()).chain_depth();
+            min_depth = std::min(min_depth, d);
+            max_depth = std::max(max_depth, d);
+        }
+        const size_t start_depth = static_cast<size_t>(total_level);
+        const size_t d0 = context.get_context_data(enc_ecd_x[0].params_id()).chain_depth();
+        const size_t drops0 = (start_depth >= d0) ? (start_depth - d0) : 0;
+        cout << "[MOAI_DEPTH_DEBUG] before attention: depth(enc_ecd_x[0])="
+             << d0
+             << " min_depth=" << min_depth << " max_depth=" << max_depth
+             << " chain_index(enc_ecd_x[0])=" << enc_ecd_x[0].chain_index()
+             << " start_depth(total_level)=" << start_depth
+             << " drops(enc_ecd_x[0])=" << drops0
+             << " pre_att_drops(enc_ecd_x)=" << pre_att_drops
+             << " (expected before_att_depth≈" << (remaining_level_att - 1) << ")" << endl;
     }
 
-    cout << "Modulus chain index before attention block: " << context.get_context_data(enc_ecd_x[0].params_id()).chain_depth() << endl;
+    cout << "Modulus chain before attention: chain_depth=" << context.get_context_data(enc_ecd_x[0].params_id()).chain_depth()
+         << " chain_index=" << enc_ecd_x[0].chain_index() << " (set MOAI_CHAIN_DEBUG=1 for per-head traces)" << endl;
 
     vector<vector<PhantomCiphertext>> att_block(num_head);
 
@@ -751,17 +858,26 @@ void single_layer_test()
 
     // #pragma omp parallel for
 
-    for(int i = 0 ; i < 128 ; ++i){
-        for(int j = 0 ; j < 6 ; ++j){
-            bootstrapper.bootstrap_3(rtn[i*6+j],att_selfoutput[i*6+j]);
+    if (!moai_ln_disable_preln_bootstrap) {
+        for(int i = 0 ; i < 128 ; ++i){
+            for(int j = 0 ; j < 6 ; ++j){
+                bootstrapper.bootstrap_3(rtn[i*6+j],att_selfoutput[i*6+j]);
+            }
         }
+    } else {
+        // Variant 1/2: skip pre-LN bootstrapping; keep ciphertexts as-is for LN.
+        rtn = att_selfoutput;
     }
 
     gettimeofday(&tend1,NULL);
     double boot_time = tend1.tv_sec-tstart1.tv_sec+(tend1.tv_usec-tstart1.tv_usec)/1000000.0;
-    cout <<"bootstrapping time = "<<boot_time<<endl;
-    append_csv_row("../single_layer_results.csv", "1st Bootstrapping", boot_time);
-    cout <<"Modulus chain index after bootstrapping: "<< context.get_context_data(rtn[0].params_id()).chain_depth()<<endl;
+    cout << (moai_ln_disable_preln_bootstrap ? "[SKIP pre-LN1 BTS] " : "") << "bootstrapping time = " << boot_time << endl;
+    append_csv_row("../single_layer_results.csv",
+                   moai_ln_disable_preln_bootstrap ? "1st Bootstrapping (skipped)" : "1st Bootstrapping",
+                   boot_time);
+    append_csv_row("../single_layer_results.csv", "pre-LN1 bootstrapping calls", moai_ln_disable_preln_bootstrap ? 0.0 : 1.0);
+    append_csv_row("../single_layer_results.csv", "pre-LN1 bootstrapped ciphertexts", moai_ln_disable_preln_bootstrap ? 0.0 : 768.0);
+    cout <<"Modulus chain index after (pre-LN1) bootstrapping stage: "<< context.get_context_data(rtn[0].params_id()).chain_depth()<<endl;
 
     //for (int i = 0; i < rtn.size(); ++i){
     //    evaluator.mod_switch_to_next_inplace(rtn[i]);
@@ -801,13 +917,25 @@ void single_layer_test()
         evaluator.add_inplace(rtn[i],enc_ecd_x_copy[i]);
     }
 
-    vector<PhantomCiphertext> layernorm_selfoutput = layernorm(rtn,layernorm1_gamma,layernorm1_beta, b_vec,
-        context,relin_keys,secret_key);
+    double ln1_internal_var_bs_time = 0.0;
+    vector<PhantomCiphertext> layernorm_selfoutput =
+        layernorm(rtn, layernorm1_gamma, layernorm1_beta, b_vec, context, relin_keys, secret_key,
+                 moai_ln_enable_internal_var_bootstrap ? &bootstrapper : nullptr,
+                 moai_ln_enable_internal_var_bootstrap,
+                 &ln1_internal_var_bs_time);
 
     gettimeofday(&tend1,NULL);
     double layernorm_time = tend1.tv_sec-tstart1.tv_sec+(tend1.tv_usec-tstart1.tv_usec)/1000000.0;
     cout <<"layernorm time = "<<layernorm_time<<endl;
     append_csv_row("../single_layer_results.csv", "LayerNorm1", layernorm_time);
+    if (moai_ln_enable_internal_var_bootstrap) {
+        append_csv_row("../single_layer_results.csv", "LayerNorm1 internal var bootstrap", ln1_internal_var_bs_time);
+        append_csv_row("../single_layer_results.csv", "LN1 internal var bootstrap calls", 1.0);
+        append_csv_row("../single_layer_results.csv", "LN1 internal bootstrapped ciphertexts", 1.0);
+    } else {
+        append_csv_row("../single_layer_results.csv", "LN1 internal var bootstrap calls", 0.0);
+        append_csv_row("../single_layer_results.csv", "LN1 internal bootstrapped ciphertexts", 0.0);
+    }
     cout <<"Modulus chain index after layernorm: "<< context.get_context_data(layernorm_selfoutput[0].params_id()).chain_depth()<<endl;
     vector<PhantomCiphertext>().swap(enc_ecd_x_copy);
 /*
@@ -925,21 +1053,26 @@ void single_layer_test()
 */
 
     const int max_threads = omp_get_max_threads();
-    const int nthreads = std::max(1, std::min(max_threads, 32));
+    // GeLU / post-intermediate paths use up to this many OpenMP threads, each with a CUDA stream and
+    // heavy temp ciphertexts in gelu_v2 — cap to reduce VRAM (see MOAI_SINGLE_LAYER_OMP_THREADS).
+    int thread_cap = 32;
+    if (const char *ev = std::getenv("MOAI_SINGLE_LAYER_OMP_THREADS")) {
+        char *end = nullptr;
+        long v = std::strtol(ev, &end, 10);
+        if (end != ev && *end == '\0' && v >= 1 && v <= 128) {
+            thread_cap = static_cast<int>(v);
+        }
+    }
+    const int nthreads = std::max(1, std::min(max_threads, thread_cap));
     // std::cout << "nums of thread: " << nthreads << std::endl;
 
 
-    if (nthreads == 1)
-    {
-        stream_pool.reserve(nthreads);
-        stream_pool[0] = *phantom::util::global_variables::default_stream;
-    }
-    else if (stream_pool.size() < static_cast<size_t>(nthreads))
+    if (stream_pool.size() < static_cast<size_t>(nthreads))
     {
         stream_pool.reserve(nthreads);
         for (size_t i = stream_pool.size(); i < static_cast<size_t>(nthreads); ++i)
         {
-        stream_pool.emplace_back();
+            stream_pool.emplace_back();
         }
     }
 
@@ -1030,12 +1163,8 @@ void single_layer_test()
         stream_pool.reserve(nthreads);
         for (size_t i = stream_pool.size(); i < static_cast<size_t>(nthreads); ++i)
         {
-            stream_pool.emplace_back(); 
+            stream_pool.emplace_back();
         }
-    }
-    if (nthreads == 1)
-    {
-        stream_pool[0] = *phantom::util::global_variables::default_stream;
     }
 
     vector<PhantomCiphertext> gelu_output(num_inter);
@@ -1191,17 +1320,26 @@ void single_layer_test()
 
     // #pragma omp parallel for
 
-    for(int i = 0 ; i < 128 ; ++i){
-        for(int j = 0 ; j < 6 ; ++j){
-            bootstrapper.bootstrap_3(rtn2[i*6+j],final_output[i*6+j]);
+    if (!moai_ln_disable_preln_bootstrap) {
+        for(int i = 0 ; i < 128 ; ++i){
+            for(int j = 0 ; j < 6 ; ++j){
+                bootstrapper.bootstrap_3(rtn2[i*6+j],final_output[i*6+j]);
+            }
         }
+    } else {
+        // Variant 1/2: skip pre-LN bootstrapping; keep ciphertexts as-is for LN.
+        rtn2 = final_output;
     }
 
     gettimeofday(&tend1,NULL);
     double boot_time3 = tend1.tv_sec-tstart1.tv_sec+(tend1.tv_usec-tstart1.tv_usec)/1000000.0;
-    cout <<"bootstrapping time = "<<boot_time3<<endl;
-    append_csv_row("../single_layer_results.csv", "3rd Bootstrapping", boot_time3);
-    cout <<"Modulus chain index after bootstrapping: "<< context.get_context_data(rtn2[0].params_id()).chain_depth()<<endl;
+    cout << (moai_ln_disable_preln_bootstrap ? "[SKIP pre-LN2 BTS] " : "") << "bootstrapping time = " << boot_time3 << endl;
+    append_csv_row("../single_layer_results.csv",
+                   moai_ln_disable_preln_bootstrap ? "3rd Bootstrapping (skipped)" : "3rd Bootstrapping",
+                   boot_time3);
+    append_csv_row("../single_layer_results.csv", "pre-LN2 bootstrapping calls", moai_ln_disable_preln_bootstrap ? 0.0 : 1.0);
+    append_csv_row("../single_layer_results.csv", "pre-LN2 bootstrapped ciphertexts", moai_ln_disable_preln_bootstrap ? 0.0 : 768.0);
+    cout <<"Modulus chain index after (pre-LN2) bootstrapping stage: "<< context.get_context_data(rtn2[0].params_id()).chain_depth()<<endl;
 
    // for (int i = 0; i < rtn2.size(); ++i){
     //    evaluator.mod_switch_to_next_inplace(rtn2[i]);
@@ -1238,13 +1376,25 @@ void single_layer_test()
 
     cout <<endl;
 */
-    vector<PhantomCiphertext> layernorm_finaloutput = layernorm2(rtn2,layernorm2_gamma,layernorm2_beta,b_vec,
-        context,relin_keys,secret_key);
+    double ln2_internal_var_bs_time = 0.0;
+    vector<PhantomCiphertext> layernorm_finaloutput =
+        layernorm2(rtn2, layernorm2_gamma, layernorm2_beta, b_vec, context, relin_keys, secret_key,
+                  moai_ln_enable_internal_var_bootstrap ? &bootstrapper : nullptr,
+                  moai_ln_enable_internal_var_bootstrap,
+                  &ln2_internal_var_bs_time);
 
     gettimeofday(&tend1,NULL);
     double layernorm_time2 = tend1.tv_sec-tstart1.tv_sec+(tend1.tv_usec-tstart1.tv_usec)/1000000.0;
     cout <<"layernorm time = "<<layernorm_time2<<endl;
     append_csv_row("../single_layer_results.csv", "LayerNorm2", layernorm_time2);
+    if (moai_ln_enable_internal_var_bootstrap) {
+        append_csv_row("../single_layer_results.csv", "LayerNorm2 internal var bootstrap", ln2_internal_var_bs_time);
+        append_csv_row("../single_layer_results.csv", "LN2 internal var bootstrap calls", 1.0);
+        append_csv_row("../single_layer_results.csv", "LN2 internal bootstrapped ciphertexts", 1.0);
+    } else {
+        append_csv_row("../single_layer_results.csv", "LN2 internal var bootstrap calls", 0.0);
+        append_csv_row("../single_layer_results.csv", "LN2 internal bootstrapped ciphertexts", 0.0);
+    }
     cout <<"Modulus chain index after layernorm: "<< context.get_context_data(layernorm_finaloutput[0].params_id()).chain_depth()<<endl;
     vector<PhantomCiphertext>().swap(rtn);
 

@@ -164,10 +164,6 @@ void silu_test()
             stream_pool.emplace_back();
         }
     }
-    if (nthreads == 1)
-    {
-        stream_pool[0] = *phantom::util::global_variables::default_stream;
-    }
 
     vector<PhantomCiphertext> output(num_col);
 

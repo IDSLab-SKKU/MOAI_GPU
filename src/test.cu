@@ -1,4 +1,5 @@
 #include "include.cuh"
+#include <cstring>
 // #include "test_ct_pt_matrix_mul.cuh"
 // #include "test_phantom_ckks.cuh"
 // #include "test_batch_encode_encrypt.cuh"
@@ -16,6 +17,29 @@ using namespace moai;
 
 int main()
 {
+    // Micro-benchmarks only (fixed CKKS params inside each test; no MOAI_ALPHA):
+    //   MOAI_BENCH_MODE=boot    -> bootstrapping_test()
+    //   MOAI_BENCH_MODE=ct_pt   -> ct_pt_matrix_mul_test()
+    //   MOAI_BENCH_MODE=ct_ct   -> ct_ct_matrix_mul_test()
+    // Unset -> single_layer_test() below.
+    if (const char *bench = std::getenv("MOAI_BENCH_MODE");
+        bench != nullptr && bench[0] != '\0') {
+        if (std::strcmp(bench, "boot") == 0) {
+            bootstrapping_test();
+            return 0;
+        }
+        if (std::strcmp(bench, "ct_pt") == 0) {
+            ct_pt_matrix_mul_test();
+            return 0;
+        }
+        if (std::strcmp(bench, "ct_ct") == 0) {
+            ct_ct_matrix_mul_test();
+            return 0;
+        }
+        std::cerr << "MOAI_BENCH_MODE='" << bench
+                  << "' — use boot | ct_pt | ct_ct | (unset for single_layer)\n";
+        return 2;
+    }
 
     // cout << "test Phantom ckks" << endl;
     // phantom_ckks_test();
@@ -67,9 +91,9 @@ int main()
 
     // Precomputed keys (optional): export MOAI_PRECOMPUTED_KEYS_DIR=/path/to/keys_dnum_35
     // or MOAI_KEYS_BASE=/path/to/keys and MOAI_ALPHA=1 (selects .../keys_dnum_<dnum>).
-    cout << "single layer test" << endl;
-    single_layer_test();
-    cout << "single layer test passed!" << endl;
+   //cout << "single layer test" << endl;
+   // single_layer_test();
+   // cout << "single layer test passed!" << endl;
 
     // cout << "Rotary Position Embedding test" << endl;
     // rotary_pos_embed_test();
