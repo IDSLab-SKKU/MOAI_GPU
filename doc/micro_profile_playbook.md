@@ -48,3 +48,5 @@
 ---
 
 관련 스크립트 예: `profile_ct_pt_micro.sh`, `profile_ct_pt_pre_micro.sh`, `profile_ct_ct_micro.sh`, `profile_softmax_micro.sh`, `profile_gelu_micro.sh`, `profile_layernorm_micro.sh`, `profile_bootstrap_micro.sh`.
+
+연산별 요약(핸드오프·새 채팅 프롬프트용): [`micro_profile_operations_index.md`](micro_profile_operations_index.md).

@@ -73,15 +73,13 @@ namespace moai
     inline void encode(double value, size_t chain_index, double scale, PhantomPlaintext &plain,
                        const cuda_stream_wrapper &stream_wrapper = *phantom::util::global_variables::default_stream)
     {
-      vector<double> values(encoder->slot_count(), value);
-      encoder->encode(*context, values, scale, plain, chain_index, stream_wrapper);
+      encoder->encode_uniform_real(*context, value, scale, plain, chain_index, stream_wrapper);
     }
 
     inline void encode(double value, double scale, PhantomPlaintext &plain,
                        const cuda_stream_wrapper &stream_wrapper = *phantom::util::global_variables::default_stream)
     {
-      vector<double> values(encoder->slot_count(), value);
-      encoder->encode(*context, values, scale, plain, 1, stream_wrapper);
+      encoder->encode_uniform_real(*context, value, scale, plain, 1, stream_wrapper);
     }
 
     inline void encode(complex<double> complex_value, double scale, PhantomPlaintext &plain,

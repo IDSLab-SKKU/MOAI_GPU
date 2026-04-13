@@ -28,6 +28,11 @@ private:
                          PhantomPlaintext &destination,
                          const cudaStream_t &stream);
 
+    /** CKKS encode when every slot holds the same real value (broadcast). Skips slot-vector host fill and
+     *  `special_fft_backward` by reusing a precomputed linear-transform template for the all-ones slot vector. */
+    void encode_internal_uniform_real(const PhantomContext &context, double value, size_t chain_index, double scale,
+                                      PhantomPlaintext &destination, const cudaStream_t &stream);
+
     inline void encode_internal(const PhantomContext &context,
                                 const double *values, size_t values_size,
                                 size_t chain_index, double scale,
@@ -81,6 +86,16 @@ public:
     PhantomCKKSEncoder &operator=(PhantomCKKSEncoder &&assign) = delete;
 
     ~PhantomCKKSEncoder() = default;
+
+    void encode_uniform_real(const PhantomContext &context, double value, double scale, PhantomPlaintext &destination,
+                             size_t chain_index,
+                             const phantom::util::cuda_stream_wrapper &stream_wrapper =
+                                     *phantom::util::global_variables::default_stream) {
+        const auto &s = stream_wrapper.get_stream();
+        destination.chain_index_ = 0;
+        destination.resize(context.coeff_mod_size_, context.poly_degree_, s);
+        encode_internal_uniform_real(context, value, chain_index, scale, destination, s);
+    }
 
     template<class T>
     inline void encode(const PhantomContext &context,

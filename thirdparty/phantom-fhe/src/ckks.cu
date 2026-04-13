@@ -1,6 +1,9 @@
 #include "ckks.h"
 #include "fft.h"
 
+#include <mutex>
+#include <unordered_map>
+
 using namespace std;
 using namespace phantom;
 using namespace phantom::util;
@@ -243,4 +246,102 @@ void PhantomCKKSEncoder::decode_internal(const PhantomContext &context, const Ph
 
     // explicit synchronization in case user wants to use the result immediately
     cudaStreamSynchronize(stream);
+}
+
+namespace {
+
+struct CkksUniformSlotBasisCache {
+    phantom::util::cuda_auto_ptr<cuDoubleComplex> basis{};
+    double max_abs = 0.0;
+};
+
+std::mutex g_ckks_uniform_basis_mu;
+std::unordered_map<uint32_t, CkksUniformSlotBasisCache> g_ckks_uniform_basis_by_slots;
+
+__global__ void ckks_fill_unit_real_kernel(cuDoubleComplex *dst, uint32_t n) {
+    for (uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x; tid < n; tid += blockDim.x * gridDim.x) {
+        dst[tid] = make_cuDoubleComplex(1.0, 0.0);
+    }
+}
+
+__global__ void ckks_scale_complex_by_real_kernel(const cuDoubleComplex *src, cuDoubleComplex *dst, uint32_t n,
+                                                  double s) {
+    for (uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x; tid < n; tid += blockDim.x * gridDim.x) {
+        cuDoubleComplex b = src[tid];
+        dst[tid] = make_cuDoubleComplex(b.x * s, b.y * s);
+    }
+}
+
+const CkksUniformSlotBasisCache &get_ckks_uniform_basis(uint32_t slots, DCKKSEncoderInfo &gp, const cudaStream_t &stream) {
+    std::lock_guard<std::mutex> lock(g_ckks_uniform_basis_mu);
+    auto [it, inserted] = g_ckks_uniform_basis_by_slots.try_emplace(slots);
+    CkksUniformSlotBasisCache &cache = it->second;
+    if (inserted) {
+        cache.basis = make_cuda_auto_ptr<cuDoubleComplex>(slots, stream);
+        gp.set_sparse_slots(slots);
+        PHANTOM_CHECK_CUDA(cudaMemsetAsync(gp.in(), 0, slots * sizeof(cuDoubleComplex), stream));
+        const uint32_t grid = (slots + blockDimGlb.x - 1) / blockDimGlb.x;
+        ckks_fill_unit_real_kernel<<<grid, blockDimGlb, 0, stream>>>(gp.in(), slots);
+        special_fft_backward(gp, 1.0, stream);
+        PHANTOM_CHECK_CUDA(cudaMemcpyAsync(cache.basis.get(), gp.in(), slots * sizeof(cuDoubleComplex),
+                                           cudaMemcpyDeviceToDevice, stream));
+        PHANTOM_CHECK_CUDA(cudaStreamSynchronize(stream));
+        vector<cuDoubleComplex> host(slots);
+        PHANTOM_CHECK_CUDA(
+                cudaMemcpy(host.data(), cache.basis.get(), slots * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
+        for (uint32_t i = 0; i < slots; ++i) {
+            cache.max_abs = std::max(cache.max_abs, std::fabs(host[i].x));
+            cache.max_abs = std::max(cache.max_abs, std::fabs(host[i].y));
+        }
+    }
+    return cache;
+}
+
+} // namespace
+
+void PhantomCKKSEncoder::encode_internal_uniform_real(const PhantomContext &context, double value, size_t chain_index,
+                                                      double scale, PhantomPlaintext &destination,
+                                                      const cudaStream_t &stream) {
+    auto &context_data = context.get_context_data(chain_index);
+    auto &parms = context_data.parms();
+    auto &coeff_modulus = parms.coeff_modulus();
+    auto &rns_tool = context_data.gpu_rns_tool();
+    std::size_t coeff_modulus_size = coeff_modulus.size();
+    std::size_t coeff_count = parms.poly_modulus_degree();
+
+    if (parms.scheme() != scheme_type::ckks) {
+        throw std::invalid_argument("unsupported scheme");
+    }
+    if (scale <= 0 || (static_cast<int>(log2(scale)) + 1 >= context_data.total_coeff_modulus_bit_count())) {
+        throw std::invalid_argument("scale out of bounds");
+    }
+    if (slots_ < 2) {
+        throw std::invalid_argument("uniform real encoding unavailable for slots < 2");
+    }
+
+    sparse_slots_ = slots_;
+    gpu_ckks_msg_vec_->set_sparse_slots(slots_);
+
+    const CkksUniformSlotBasisCache &basis_cache = get_ckks_uniform_basis(slots_, *gpu_ckks_msg_vec_, stream);
+
+    const double fix = scale / static_cast<double>(slots_);
+    const double scaled_value = value * fix;
+    const uint32_t grid_dim = (slots_ + blockDimGlb.x - 1) / blockDimGlb.x;
+    ckks_scale_complex_by_real_kernel<<<grid_dim, blockDimGlb, 0, stream>>>(
+            basis_cache.basis.get(), gpu_ckks_msg_vec_->in(), slots_, scaled_value);
+
+    const double max_coeff = std::fabs(scaled_value) * basis_cache.max_abs;
+    const int max_coeff_bit_count = static_cast<int>(std::ceil(std::log2(std::max(max_coeff, 1.0)))) + 1;
+
+    if (max_coeff_bit_count >= context_data.total_coeff_modulus_bit_count()) {
+        throw std::invalid_argument("encoded values are too large");
+    }
+
+    rns_tool.base_Ql().decompose_array(destination.data(), gpu_ckks_msg_vec_->in(), slots_ << 1, 1u,
+                                         max_coeff_bit_count, stream);
+
+    nwt_2d_radix8_forward_inplace(destination.data(), context.gpu_rns_tables(), coeff_modulus_size, 0, stream);
+
+    destination.chain_index_ = chain_index;
+    destination.scale_ = scale;
 }

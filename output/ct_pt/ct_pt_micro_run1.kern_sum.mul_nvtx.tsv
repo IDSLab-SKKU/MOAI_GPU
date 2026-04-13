@@ -1,16 +1,17 @@
-Generating SQLite file /home/jyg/projects/MOAI_GPU/output/ct_pt_micro_run1.sqlite from /home/jyg/projects/MOAI_GPU/output/ct_pt_micro_run1.nsys-rep
-Processing [/home/jyg/projects/MOAI_GPU/output/ct_pt_micro_run1.sqlite] with [/usr/local/cuda-12.8/nsight-systems-2024.6.2/host-linux-x64/reports/cuda_gpu_kern_sum.py](nvtx=moai:ct_pt_matrix_mul_wo_pre)... 
+Generating SQLite file /home/jyg/projects/MOAI_GPU/output/ct_pt/ct_pt_micro_run1.sqlite from /home/jyg/projects/MOAI_GPU/output/ct_pt/ct_pt_micro_run1.nsys-rep
+Processing [/home/jyg/projects/MOAI_GPU/output/ct_pt/ct_pt_micro_run1.sqlite] with [/usr/local/cuda-12.8/nsight-systems-2024.6.2/host-linux-x64/reports/cuda_gpu_kern_sum.py](nvtx=moai:ct_pt_matrix_mul_wo_pre)... 
 Time (%)	Total Time (ns)	Instances	Avg (ns)	Med (ns)	Min (ns)	Max (ns)	StdDev (ns)	Name
-38.3	5142089486	49152	104616.1	104161.0	91136	139201	5002.1	inplace_special_ifft_base_kernel(double2 *, const double2 *, const unsigned int *, unsigned int, unsigned int, unsigned int, int, unsigned int, unsigned int, double)
-14.5	1947507206	196608	9905.5	9568.0	7648	31296	1511.0	inplace_special_ifft_iter_kernel(double2 *, const double2 *, const unsigned int *, unsigned int, unsigned int, unsigned int, int, unsigned int, unsigned int, double)
-10.6	1421515854	49280	28845.7	27648.0	21216	53408	3092.9	inplace_fnwt_radix8_phase2(unsigned long *, const unsigned long *, const unsigned long *, const DModulus *, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long)
-10.3	1378789030	98304	14025.8	13792.0	11712	25408	1273.3	multiply_rns_poly(const unsigned long *, const unsigned long *, const DModulus *, unsigned long *, unsigned long, unsigned long)
-9.8	1311326219	98176	13356.9	13216.0	11584	32768	873.8	add_rns_poly(const unsigned long *, const unsigned long *, const DModulus *, unsigned long *, unsigned long, unsigned long)
-9.2	1241991756	49280	25202.8	24992.0	19552	40480	1746.0	inplace_fnwt_radix8_phase1(unsigned long *, const unsigned long *, const unsigned long *, const DModulus *, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long)
-5.6	755723599	49152	15375.2	15072.0	12736	33952	1806.6	phantom::arith::decompose_array_uint64(unsigned long *, const double2 *, const DModulus *, unsigned int, unsigned int, unsigned int)
-1.7	231826003	49152	4716.5	4128.0	2880	29056	1653.6	bit_reverse_and_zero_padding(double2 *, double2 *, unsigned long, unsigned int, unsigned int)
-0.0	2639255	128	20619.2	19312.0	9856	45632	7223.2	inplace_inwt_radix8_phase1(unsigned long *, const unsigned long *, const unsigned long *, const DModulus *, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long)
-0.0	1890183	128	14767.1	13696.0	8768	30464	4312.1	inplace_inwt_radix8_phase2(unsigned long *, const unsigned long *, const unsigned long *, const unsigned long *, const unsigned long *, const DModulus *, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long)
-0.0	1769997	128	13828.1	13184.0	11424	28128	2508.8	phantom::divide_and_round_ntt_inv_scalar_kernel(unsigned long *, const unsigned long *, const DModulus *, const unsigned long *, const unsigned long *, unsigned long, unsigned long)
-0.0	1597671	128	12481.8	12032.0	10944	23456	1670.4	phantom::divide_and_round_reduce_q_last_kernel(unsigned long *, const unsigned long *, const DModulus *, unsigned long, unsigned long)
+22.8	1453004145	49280	29484.7	29280.0	21569	47840	1521.1	inplace_fnwt_radix8_phase2(unsigned long *, const unsigned long *, const unsigned long *, const DModulus *, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long)
+21.1	1341517403	49280	27222.3	27008.0	22592	39680	1519.7	inplace_fnwt_radix8_phase1(unsigned long *, const unsigned long *, const unsigned long *, const DModulus *, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long)
+20.5	1305292340	98176	13295.4	13056.0	11616	30560	884.9	add_rns_poly(const unsigned long *, const unsigned long *, const DModulus *, unsigned long *, unsigned long, unsigned long)
+20.5	1303505192	98304	13259.9	12705.0	11680	27200	1367.9	multiply_rns_poly(const unsigned long *, const unsigned long *, const DModulus *, unsigned long *, unsigned long, unsigned long)
+11.7	745606688	49152	15169.4	15360.0	12192	37569	992.7	phantom::arith::decompose_array_uint64(unsigned long *, const double2 *, const DModulus *, unsigned int, unsigned int, unsigned int)
+3.2	203034744	49152	4130.8	4032.0	2656	14432	881.3	<unnamed>::ckks_scale_complex_by_real_kernel(const double2 *, double2 *, unsigned int, double)
+0.0	2673630	128	20887.7	18752.0	12064	38752	5962.1	inplace_inwt_radix8_phase1(unsigned long *, const unsigned long *, const unsigned long *, const DModulus *, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long)
+0.0	2343867	128	18311.5	17840.0	12384	32448	3816.1	inplace_inwt_radix8_phase2(unsigned long *, const unsigned long *, const unsigned long *, const unsigned long *, const unsigned long *, const DModulus *, unsigned long, unsigned long, unsigned long, unsigned long, unsigned long)
+0.0	1866233	128	14579.9	13985.0	11456	30784	2864.7	phantom::divide_and_round_ntt_inv_scalar_kernel(unsigned long *, const unsigned long *, const DModulus *, const unsigned long *, const unsigned long *, unsigned long, unsigned long)
+0.0	1524853	128	11912.9	11616.0	10720	17472	987.0	phantom::divide_and_round_reduce_q_last_kernel(unsigned long *, const unsigned long *, const DModulus *, unsigned long, unsigned long)
+0.0	93633	1	93633.0	93633.0	93633	93633	0.0	inplace_special_ifft_base_kernel(double2 *, const double2 *, const unsigned int *, unsigned int, unsigned int, unsigned int, int, unsigned int, unsigned int, double)
+0.0	34337	4	8584.3	8000.0	7936	10401	1212.7	inplace_special_ifft_iter_kernel(double2 *, const double2 *, const unsigned int *, unsigned int, unsigned int, unsigned int, int, unsigned int, unsigned int, double)
+0.0	2432	1	2432.0	2432.0	2432	2432	0.0	<unnamed>::ckks_fill_unit_real_kernel(double2 *, unsigned int)
 

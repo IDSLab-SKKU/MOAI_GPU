@@ -1,2 +1,2 @@
 run	nsys_rep	kern_sum_tsv	parse_full	parse_mul
-1	/home/jyg/projects/MOAI_GPU/output/ct_pt_micro_run1.nsys-rep	/home/jyg/projects/MOAI_GPU/output/ct_pt_micro_run1.kern_sum.tsv	rows=27;total_time_ns=14173035185;ntt_like_time_ns=2936909189;ntt_like_fraction=0.207218;	rows=12;total_time_ns=13438666259;ntt_like_time_ns=2669807045;ntt_like_fraction=0.198666;
+1	/home/jyg/projects/MOAI_GPU/output/ct_pt/ct_pt_micro_run1.nsys-rep	/home/jyg/projects/MOAI_GPU/output/ct_pt/ct_pt_micro_run1.kern_sum.tsv	rows=29;total_time_ns=7096949043;ntt_like_time_ns=3074237055;ntt_like_fraction=0.433177;	rows=13;total_time_ns=6360499497;ntt_like_time_ns=2801405278;ntt_like_fraction=0.440438;
