@@ -225,6 +225,100 @@ MOAI_BUILD_DIR=MOAI_GPU/build ./MOAI_GPU/src/scripts/profile_ct_pt_micro.sh
 nsys-ui MOAI_GPU/output/ct_pt/ct_pt_micro_run1.nsys-rep
 ```
 
+**사전 인코딩 가중치 경로** (`ct_pt_matrix_mul(enc_X, ecd_w, …)`, 프로덕션에 가까움):
+
+- **진입**: `MOAI_BENCH_MODE=ct_pt_pre` → [`ct_pt_matrix_mul_w_preprocess_test()`](../src/include/test/matrix_mul/test_ct_pt_matrix_mul.cuh).
+- **NVTX** (`MOAI_HAVE_NVTX`): **`moai:ct_pt_pre_encode_w`** — 스칼라 `W[i][j]`마다 `encoder.encode` 하는 **사전 인코드 루프**(CKKS 슬롯 인코드 → **IFFT 비중 큼**). **`moai:ct_pt_matrix_mul_pre_encoded`** — 그 다음 **`ct_pt_matrix_mul`만**(내부는 `multiply_plain` 등, **새 IFFT 없음**).
+- **스크립트**: [`../src/scripts/profile_ct_pt_pre_micro.sh`](../src/scripts/profile_ct_pt_pre_micro.sh) — 기본 **`output/ct_pt_pre/`**, 필터 TSV **`*.kern_sum.nvtx_encode_w.tsv`**, **`*.kern_sum.pre_enc_nvtx.tsv`**. 전체 `kern_sum` 차트는 **X 배치 인코드 + W 인코드 + 곱** 이 합쳐져 IFFT가 상위에 오는 것이 정상이다 → [`../output/ct_pt_pre/ct_pt_pre_micro_kernel_reference.md`](../output/ct_pt_pre/ct_pt_pre_micro_kernel_reference.md).
+- **메모리**: 전체 `768×64` 가중치를 모두 `encode`하면 GPU 메모리가 부족한 환경이 많다. 스크립트는 기본 **`MOAI_CT_PT_PRE_MICRO=1`** 로 문제 크기를 줄인다(테스트가 `[MOAI_CT_PT_PRE_MICRO]` 로그 출력). 원래 크기는 `MOAI_CT_PT_PRE_MICRO=0` 과 함께 수동 실행.
+
+```bash
+MOAI_BUILD_DIR=MOAI_GPU/build ./MOAI_GPU/src/scripts/profile_ct_pt_pre_micro.sh
+nsys-ui MOAI_GPU/output/ct_pt_pre/ct_pt_pre_micro_run1.nsys-rep
+```
+
+---
+
+## 13. 마이크로 `ct_ct` 커널 비중 (Nsight Systems)
+
+- **진입**: `MOAI_BENCH_MODE=ct_ct` → [`../src/test.cu`](../src/test.cu)에서 [`ct_ct_matrix_mul_test()`](../src/include/test/matrix_mul/test_ct_ct_matrix_mul.cuh) 실행.
+- **NVTX 구간** (`MOAI_HAVE_NVTX` 빌드 시): **`moai:ct_ct_matrix_mul_colpacking`**, **`moai:ct_ct_matrix_mul_diagpacking`** — 각각 열 패킹 / 대각 패킹 Ct×Ct 한 단계.
+- **스크립트**: [`../src/scripts/profile_ct_ct_micro.sh`](../src/scripts/profile_ct_ct_micro.sh) — 한 번의 `nsys profile` 후 전체 `kern_sum.tsv`와, 위 두 NVTX 이름으로 필터한 **`*.kern_sum.nvtx_col.tsv`**, **`*.kern_sum.nvtx_diag.tsv`** 를 생성. 기본 산출 디렉터리는 **`output/ct_ct/`** (`MOAI_PROFILE_DIR`로 변경 가능). `MOAI_KERN_EXPORT=1`(기본)이면 같은 폴더에 `*_clean.tsv`·차트 PNG 추가.
+- **커널 참고(정적)**: [`../output/ct_ct/ct_ct_micro_kernel_reference.md`](../output/ct_ct/ct_ct_micro_kernel_reference.md) — Ct–Ct가 Ct–Pt와 다르게 keyswitch·Galois·relin 쪽 커널을 많이 쓸 수 있다는 요약.
+- **NTT 휴리스틱 파서**: [`../src/scripts/parse_nsys_cuda_kern_sum.py`](../src/scripts/parse_nsys_cuda_kern_sum.py) — §12와 동일.
+
+예시:
+
+```bash
+MOAI_BUILD_DIR=MOAI_GPU/build ./MOAI_GPU/src/scripts/profile_ct_ct_micro.sh
+nsys-ui MOAI_GPU/output/ct_ct/ct_ct_micro_run1.nsys-rep
+```
+
+---
+
+## 14. 마이크로 Softmax (Nsight Systems)
+
+- **진입**: `MOAI_BENCH_MODE=softmax_micro` → [`../src/test.cu`](../src/test.cu)에서 [`softmax_micro_bench()`](../src/include/test/non_linear_func/test_softmax.cuh) (`softmax_test` 후 `softmax_boot_test`). 단독으로는 `MOAI_BENCH_MODE=softmax` / `softmax_boot` 도 지원한다.
+- **NVTX 구간** (`MOAI_HAVE_NVTX` 빌드 시): **`moai:softmax_without_boot`**, **`moai:softmax_boot`** — 각각 `softmax(...)` / `softmax_boot(...)` 호출 구간.
+- **스크립트**: [`../src/scripts/profile_softmax_micro.sh`](../src/scripts/profile_softmax_micro.sh) — 한 번의 `nsys profile` 후 전체 `kern_sum.tsv`와, 위 두 NVTX로 필터한 **`*.kern_sum.nvtx_no_boot.tsv`**, **`*.kern_sum.nvtx_boot.tsv`**. 기본 산출 디렉터리는 **`output/softmax/`**. `MOAI_KERN_EXPORT=1`(기본)이면 `export_ct_pt_kern_sum.py`로 `*_clean.tsv`·PNG 추가.
+- **참고**: [`../output/softmax/softmax_micro_kernel_reference.md`](../output/softmax/softmax_micro_kernel_reference.md)
+
+예시:
+
+```bash
+MOAI_BUILD_DIR=MOAI_GPU/build ./MOAI_GPU/src/scripts/profile_softmax_micro.sh
+nsys-ui MOAI_GPU/output/softmax/softmax_micro_run1.nsys-rep
+```
+
+---
+
+## 15. 마이크로 GeLU (`gelu_v2`, Nsight Systems)
+
+- **진입**: `MOAI_BENCH_MODE=gelu` → [`../src/test.cu`](../src/test.cu)에서 [`gelu_test()`](../src/include/test/non_linear_func/test_gelu.cuh).
+- **NVTX** (`MOAI_HAVE_NVTX`): **`moai:gelu_v2_batch`** — OpenMP 배치 루프 안에서 `gelu_v2(...)` 호출 구간 (`test_gelu.cuh`).
+- **스크립트**: [`../src/scripts/profile_gelu_micro.sh`](../src/scripts/profile_gelu_micro.sh) — 전체 `kern_sum.tsv` + `--filter-nvtx moai:gelu_v2_batch` → `*.kern_sum.nvtx.tsv` → export로 `*_clean.tsv`·PNG. 기본 **`output/gelu/`**.
+- **참고**: [`../output/gelu/gelu_micro_kernel_reference.md`](../output/gelu/gelu_micro_kernel_reference.md)
+- **공통 절차**: [`micro_profile_playbook.md`](micro_profile_playbook.md)
+
+```bash
+MOAI_BUILD_DIR=MOAI_GPU/build ./MOAI_GPU/src/scripts/profile_gelu_micro.sh
+nsys-ui MOAI_GPU/output/gelu/gelu_micro_run1.nsys-rep
+```
+
+---
+
+## 16. 마이크로 LayerNorm (Nsight Systems)
+
+- **진입**: `MOAI_BENCH_MODE=layernorm` → [`layernorm_test()`](../src/include/test/non_linear_func/test_layernorm.cuh).
+- **NVTX**: **`moai:layernorm`** — `layernorm(...)` 호출 전후 (`test_layernorm.cuh`).
+- **스크립트**: [`../src/scripts/profile_layernorm_micro.sh`](../src/scripts/profile_layernorm_micro.sh) — 동일 패턴, 기본 **`output/layernorm/`**.
+- **참고**: [`../output/layernorm/layernorm_micro_kernel_reference.md`](../output/layernorm/layernorm_micro_kernel_reference.md)
+
+```bash
+MOAI_BUILD_DIR=MOAI_GPU/build ./MOAI_GPU/src/scripts/profile_layernorm_micro.sh
+nsys-ui MOAI_GPU/output/layernorm/layernorm_micro_run1.nsys-rep
+```
+
+---
+
+## 17. 새 마이크로 벤치 공통 플레이북
+
+연산을 추가할 때 **NVTX → `profile_*_micro.sh` → `kern_sum` TSV → export 차트 → `output/<op>/` 커널 분석 MD → 본 문서에 짧은 절** 순서를 따르면 된다. 상세 체크리스트는 [`micro_profile_playbook.md`](micro_profile_playbook.md) 를 본문으로 삼는다.
+
+---
+
+## 18. 마이크로 Bootstrapping (`bootstrap_3`, Nsight Systems)
+
+- **진입**: `MOAI_BENCH_MODE=bootstrap_micro` 또는 **`boot`** → [`bootstrapping_test()`](../src/include/test/bootstrapping/bootstrapping.cuh) (동일 테스트).
+- **NVTX** (`MOAI_HAVE_NVTX`): **`moai:bootstrap_prepare`** (`prepare_mod_polynomial` ~ `generate_LT_coefficient_3`), **`moai:bootstrap_3`** (`Bootstrapper::bootstrap_3` 한 번).
+- **스크립트**: [`../src/scripts/profile_bootstrap_micro.sh`](../src/scripts/profile_bootstrap_micro.sh) — 전체 `kern_sum.tsv` + 위 두 NVTX로 필터한 **`*.kern_sum.nvtx_prepare.tsv`**, **`*.kern_sum.nvtx_bootstrap3.tsv`**. 기본 **`output/bootstrap/`**. `MOAI_KERN_EXPORT=1`(기본)이면 `*_clean.tsv`·PNG.
+- **참고**: [`../output/bootstrap/bootstrap_micro_kernel_reference.md`](../output/bootstrap/bootstrap_micro_kernel_reference.md)
+
+```bash
+MOAI_BUILD_DIR=MOAI_GPU/build ./MOAI_GPU/src/scripts/profile_bootstrap_micro.sh
+nsys-ui MOAI_GPU/output/bootstrap/bootstrap_micro_run1.nsys-rep
+```
+
 ---
 
 *작성: 저장소 정적 리딩 기준 (`test.cu`, `test_single_layer.cuh`, `single_att_block.cuh`, `include.cuh`, `CMakeLists.txt`, 기존 `doc/*.md`). 실행 프로파일 수치는 환경·GPU에 의존하므로 본 문서에 고정값으로 적지 않았다.*

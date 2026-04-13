@@ -16,3 +16,6 @@ build-genkeys/
 
 # Binary FHE key / ciphertext dumps (not used as tracked assets in this repo)
 *.bin
+
+#output directory
+output/

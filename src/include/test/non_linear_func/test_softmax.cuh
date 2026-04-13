@@ -1,5 +1,9 @@
 #include "include.cuh"
 
+#if defined(MOAI_HAVE_NVTX)
+#include <nvtx3/nvToolsExt.h>
+#endif
+
 using namespace std;
 using namespace phantom;
 using namespace moai;
@@ -185,8 +189,15 @@ void softmax_test()
 
     vector<int> bias_vec(slot_count, 1);
     gettimeofday(&tstart1, NULL);
-
+    cudaDeviceSynchronize();
+#if defined(MOAI_HAVE_NVTX)
+    nvtxRangePushA("moai:softmax_without_boot");
+#endif
     vector<PhantomCiphertext> enc_softmax = softmax(enc_ecd_x, bias_vec, num_X, context, relin_keys, 4, secret_key);
+#if defined(MOAI_HAVE_NVTX)
+    cudaDeviceSynchronize();
+    nvtxRangePop();
+#endif
 
     gettimeofday(&tend1, NULL);
     double softmax_time = tend1.tv_sec - tstart1.tv_sec + (tend1.tv_usec - tstart1.tv_usec) / 1000000.0;
@@ -436,9 +447,16 @@ void softmax_boot_test()
 
     vector<int> bias_vec(slot_count, 1);
     gettimeofday(&tstart1, NULL);
-
+    cudaDeviceSynchronize();
+#if defined(MOAI_HAVE_NVTX)
+    nvtxRangePushA("moai:softmax_boot");
+#endif
     vector<PhantomCiphertext> enc_softmax = softmax_boot(enc_ecd_x, bias_vec, 11, context,
                                                          relin_keys, 16, secret_key, bootstrapper, 10);
+#if defined(MOAI_HAVE_NVTX)
+    cudaDeviceSynchronize();
+    nvtxRangePop();
+#endif
 
     gettimeofday(&tend1, NULL);
     double softmax_time = tend1.tv_sec - tstart1.tv_sec + (tend1.tv_usec - tstart1.tv_usec) / 1000000.0;
@@ -484,4 +502,11 @@ void softmax_boot_test()
         }
         cout << endl;
     }
+}
+
+/** Run `softmax_test()` then `softmax_boot_test()` in one process for Nsight (two NVTX ranges). */
+void softmax_micro_bench()
+{
+    softmax_test();
+    softmax_boot_test();
 }

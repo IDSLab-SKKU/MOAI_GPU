@@ -18,13 +18,18 @@ using namespace moai;
 int main()
 {
     // Micro-benchmarks only (fixed CKKS params inside each test; no MOAI_ALPHA):
-    //   MOAI_BENCH_MODE=boot    -> bootstrapping_test()
-    //   MOAI_BENCH_MODE=ct_pt   -> ct_pt_matrix_mul_test()
-    //   MOAI_BENCH_MODE=ct_ct   -> ct_ct_matrix_mul_test()
+    //   MOAI_BENCH_MODE=boot | bootstrap_micro -> bootstrapping_test() (nsys: src/scripts/profile_bootstrap_micro.sh)
+    //   MOAI_BENCH_MODE=ct_pt      -> ct_pt_matrix_mul_test() (wo_pre; nsys: profile_ct_pt_micro.sh)
+    //   MOAI_BENCH_MODE=ct_pt_pre  -> ct_pt_matrix_mul_w_preprocess_test() (ecd W; nsys: profile_ct_pt_pre_micro.sh)
+    //   MOAI_BENCH_MODE=ct_ct   -> ct_ct_matrix_mul_test()  (nsys: src/scripts/profile_ct_ct_micro.sh)
+    //   MOAI_BENCH_MODE=softmax_micro -> softmax_test()+softmax_boot_test() (nsys: src/scripts/profile_softmax_micro.sh)
+    //   MOAI_BENCH_MODE=softmax | softmax_boot -> single test only
+    //   MOAI_BENCH_MODE=gelu      -> gelu_test() (nsys: src/scripts/profile_gelu_micro.sh)
+    //   MOAI_BENCH_MODE=layernorm -> layernorm_test() (nsys: src/scripts/profile_layernorm_micro.sh)
     // Unset -> single_layer_test() below.
     if (const char *bench = std::getenv("MOAI_BENCH_MODE");
         bench != nullptr && bench[0] != '\0') {
-        if (std::strcmp(bench, "boot") == 0) {
+        if (std::strcmp(bench, "boot") == 0 || std::strcmp(bench, "bootstrap_micro") == 0) {
             bootstrapping_test();
             return 0;
         }
@@ -32,12 +37,39 @@ int main()
             ct_pt_matrix_mul_test();
             return 0;
         }
+        if (std::strcmp(bench, "ct_pt_pre") == 0) {
+            ct_pt_matrix_mul_w_preprocess_test();
+            return 0;
+        }
         if (std::strcmp(bench, "ct_ct") == 0) {
             ct_ct_matrix_mul_test();
             return 0;
         }
+        if (std::strcmp(bench, "softmax_micro") == 0) {
+            softmax_micro_bench();
+            return 0;
+        }
+        if (std::strcmp(bench, "softmax") == 0) {
+            softmax_test();
+            return 0;
+        }
+        if (std::strcmp(bench, "softmax_boot") == 0) {
+            softmax_boot_test();
+            return 0;
+        }
+        if (std::strcmp(bench, "gelu") == 0) {
+            gelu_test();
+            return 0;
+        }
+        if (std::strcmp(bench, "layernorm") == 0) {
+            layernorm_test();
+            return 0;
+        }
         std::cerr << "MOAI_BENCH_MODE='" << bench
-                  << "' — use boot | ct_pt | ct_ct | (unset for single_layer)\n";
+                  << "' — use boot | bootstrap_micro | ct_pt | ct_pt_pre | ct_ct | softmax_micro | softmax | "
+                     "softmax_boot | gelu | "
+                     "layernorm | "
+                     "(unset for single_layer)\n";
         return 2;
     }
 

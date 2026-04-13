@@ -1,5 +1,9 @@
 #include "include.cuh"
 
+#if defined(MOAI_HAVE_NVTX)
+#include <nvtx3/nvToolsExt.h>
+#endif
+
 using namespace std;
 using namespace phantom;
 using namespace moai;
@@ -226,8 +230,15 @@ void layernorm_test()
     cout << endl;
 
     gettimeofday(&tstart1, NULL);
-
+    cudaDeviceSynchronize();
+#if defined(MOAI_HAVE_NVTX)
+    nvtxRangePushA("moai:layernorm");
+#endif
     vector<PhantomCiphertext> output = layernorm(enc_ecd_x, gamma, beta, bias_vec, context, relin_keys, secret_key);
+#if defined(MOAI_HAVE_NVTX)
+    cudaDeviceSynchronize();
+    nvtxRangePop();
+#endif
 
     gettimeofday(&tend1, NULL);
     double layernorm_time = tend1.tv_sec - tstart1.tv_sec + (tend1.tv_usec - tstart1.tv_usec) / 1000000.0;

@@ -1,5 +1,9 @@
 #include "include.cuh"
 
+#if defined(MOAI_HAVE_NVTX)
+#include <nvtx3/nvToolsExt.h>
+#endif
+
 using namespace std;
 using namespace phantom;
 using namespace moai;
@@ -167,7 +171,10 @@ void gelu_test()
     vector<PhantomCiphertext> output(num_col);
 
     gettimeofday(&tstart1, NULL);
-
+    cudaDeviceSynchronize();
+#if defined(MOAI_HAVE_NVTX)
+    nvtxRangePushA("moai:gelu_v2_batch");
+#endif
     //   omp_set_num_threads(56);
 
     //   #pragma omp parallel for
@@ -182,6 +189,10 @@ void gelu_test()
         }
         cudaStreamSynchronize(stream.get_stream());
     }
+#if defined(MOAI_HAVE_NVTX)
+    cudaDeviceSynchronize();
+    nvtxRangePop();
+#endif
 
     gettimeofday(&tend1, NULL);
     double gelu_time = tend1.tv_sec - tstart1.tv_sec + (tend1.tv_usec - tstart1.tv_usec) / 1000000.0;

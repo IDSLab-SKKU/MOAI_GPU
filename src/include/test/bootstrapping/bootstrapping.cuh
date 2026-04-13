@@ -5,6 +5,10 @@
 // #include "bootstrapping/Bootstrapper.cuh"
 #include "phantom.h"
 
+#if defined(MOAI_HAVE_NVTX)
+#include <nvtx3/nvToolsExt.h>
+#endif
+
 using namespace std;
 using namespace phantom;
 
@@ -94,6 +98,10 @@ void bootstrapping_test()
       &ckks_evaluator);
 
   std::cout << "Generating Optimal Minimax Polynomials..." << endl;
+  cudaDeviceSynchronize();
+#if defined(MOAI_HAVE_NVTX)
+  nvtxRangePushA("moai:bootstrap_prepare");
+#endif
   bootstrapper.prepare_mod_polynomial();
 
   std::cout << "Adding Bootstrapping Keys..." << endl;
@@ -114,6 +122,10 @@ void bootstrapping_test()
 
   std::cout << "Generating Linear Transformation Coefficients..." << endl;
   bootstrapper.generate_LT_coefficient_3();
+#if defined(MOAI_HAVE_NVTX)
+  cudaDeviceSynchronize();
+  nvtxRangePop();
+#endif
 
   vector<double> sparse(sparse_slots, 0.0);
   vector<double> input(slot_count, 0.0);
@@ -144,12 +156,18 @@ void bootstrapping_test()
   ckks_evaluator.decryptor.decrypt(cipher, plain);
   ckks_evaluator.encoder.decode(plain, before);
 
-  auto start = system_clock::now();
-
   PhantomCiphertext rtn;
+  cudaDeviceSynchronize();
+#if defined(MOAI_HAVE_NVTX)
+  nvtxRangePushA("moai:bootstrap_3");
+#endif
+  auto start = system_clock::now();
   bootstrapper.bootstrap_3(rtn, cipher);
-
   duration<double> sec = system_clock::now() - start;
+#if defined(MOAI_HAVE_NVTX)
+  cudaDeviceSynchronize();
+  nvtxRangePop();
+#endif
   std::cout << "Bootstrapping took: " << sec.count() << "s" << endl;
   std::cout << "Return cipher level: " << rtn.coeff_modulus_size() << endl;
 

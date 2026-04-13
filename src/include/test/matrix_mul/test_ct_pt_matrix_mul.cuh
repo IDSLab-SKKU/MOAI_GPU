@@ -1,5 +1,8 @@
 #include "include.cuh"
 
+#include <cstdlib>
+#include <cstring>
+
 #if defined(MOAI_HAVE_NVTX)
 #include <nvtx3/nvToolsExt.h>
 #endif
@@ -222,10 +225,21 @@ void ct_pt_matrix_mul_w_preprocess_test()
 
     size_t slot_count = encoder.slot_count();
 
-    // construct input
+    // construct input (full size OOMs on many GPUs when building ecd_w = num_col*col_W plaintexts;
+    // MOAI_CT_PT_PRE_MICRO=1 shrinks for nsys; profile script sets it by default.)
+    const char *pre_micro = std::getenv("MOAI_CT_PT_PRE_MICRO");
+    const bool use_pre_micro =
+        pre_micro != nullptr && pre_micro[0] != '\0' && std::strcmp(pre_micro, "0") != 0;
     int num_X = 256;
     int num_row = 128;
     int num_col = 768;
+    if (use_pre_micro)
+    {
+        num_X = 4;
+        num_row = 128;
+        num_col = 256;
+        cout << "[MOAI_CT_PT_PRE_MICRO] num_X=" << num_X << " num_row=" << num_row << " num_col=" << num_col << endl;
+    }
     cout << "Number of matrices in one batch = " << num_X << endl;
     vector<vector<vector<double>>> input_x(num_X, vector<vector<double>>(num_row, vector<double>(num_col, 0)));
     for (int i = 0; i < num_X; ++i)
@@ -278,17 +292,19 @@ void ct_pt_matrix_mul_w_preprocess_test()
     */
 
     // construct W
-    int col_W = 64;
+    int col_W = use_pre_micro ? 32 : 64;
     vector<vector<double>> W(num_col, vector<double>(col_W, 1.0 / 128.0));
     cout << "Matrix W size = " << num_col << " * " << col_W << endl;
 
-    // encode W
+    // encode W (each encode runs CKKS slot encoding → IFFT on GPU; not part of ct_pt_matrix_mul)
     vector<vector<PhantomPlaintext>> ecd_w(num_col, vector<PhantomPlaintext>(col_W));
 
     // #pragma omp parallel for
     std::chrono::_V2::system_clock::time_point start_encode = high_resolution_clock::now();
-    // cudaDeviceSynchronize();
-
+    cudaDeviceSynchronize();
+#if defined(MOAI_HAVE_NVTX)
+    nvtxRangePushA("moai:ct_pt_pre_encode_w");
+#endif
     for (int i = 0; i < num_col; ++i)
     {
         for (int j = 0; j < col_W; ++j)
@@ -296,6 +312,10 @@ void ct_pt_matrix_mul_w_preprocess_test()
             encoder.encode(W[i][j], scale, ecd_w[i][j]);
         }
     }
+#if defined(MOAI_HAVE_NVTX)
+    cudaDeviceSynchronize();
+    nvtxRangePop();
+#endif
     cout << "encode W. " << endl;
 
     cout << "Encrypted col-packing X * ecd W = Encrypted col-packing XW. " << endl;
@@ -303,16 +323,23 @@ void ct_pt_matrix_mul_w_preprocess_test()
     std::chrono::duration<double, std::milli> duration_encode = end_encode - start_encode;
     cudaDeviceSynchronize();
     cout << "[DEBUG]pre-encoding time: " << duration_encode.count() << " ms" << endl;
-    // matrix multiplication
+    // matrix multiplication (W already encoded to ecd_w; NVTX = mul only for nsys filter)
     // gettimeofday(&tstart1,NULL);
+    cudaDeviceSynchronize();
+#if defined(MOAI_HAVE_NVTX)
+    nvtxRangePushA("moai:ct_pt_matrix_mul_pre_encoded");
+#endif
     std::chrono::_V2::system_clock::time_point start = high_resolution_clock::now();
-
     vector<PhantomCiphertext> ct_pt_mul = ct_pt_matrix_mul(enc_ecd_x, ecd_w, num_col, col_W, num_col, context);
+    std::chrono::_V2::system_clock::time_point end = high_resolution_clock::now();
+#if defined(MOAI_HAVE_NVTX)
+    cudaDeviceSynchronize();
+    nvtxRangePop();
+#endif
 
     // gettimeofday(&tend1,NULL);
     // double ct_pt_matrix_mul_time = tend1.tv_sec-tstart1.tv_sec+(tend1.tv_usec-tstart1.tv_usec)/1000000.0;
     // cout <<"Ct-Pt matrix multiplication time (pre process not included) = "<<ct_pt_matrix_mul_time<<endl;
-    std::chrono::_V2::system_clock::time_point end = high_resolution_clock::now();
     std::chrono::duration<double, std::milli> duration = end - start;
     cudaDeviceSynchronize();
     cout << "Ct-Pt matrix multiplication time (pre process not included) = " << duration.count() << " ms" << endl;

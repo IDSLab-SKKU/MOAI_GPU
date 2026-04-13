@@ -1,5 +1,9 @@
 #include "include.cuh"
 
+#if defined(MOAI_HAVE_NVTX)
+#include <nvtx3/nvToolsExt.h>
+#endif
+
 using namespace std;
 using namespace phantom;
 using namespace moai;
@@ -123,9 +127,16 @@ void ct_ct_matrix_mul_test()
     // matrix multiplication
     cout << "Encrypted col-packing X * (Encrypted col-packing W)^T = Encrypted diag-packing XW^T " << endl;
     gettimeofday(&tstart1, NULL);
-
+    cudaDeviceSynchronize();
+#if defined(MOAI_HAVE_NVTX)
+    nvtxRangePushA("moai:ct_ct_matrix_mul_colpacking");
+#endif
     vector<PhantomCiphertext> ct_ct_mul = ct_ct_matrix_mul_colpacking(enc_ecd_x, enc_ecd_w, gal_keys, relin_keys,
                                                                       context, num_col, num_row, num_col, num_row, num_X);
+#if defined(MOAI_HAVE_NVTX)
+    cudaDeviceSynchronize();
+    nvtxRangePop();
+#endif
 
     gettimeofday(&tend1, NULL);
     double ct_ct_matrix_mul_time = tend1.tv_sec - tstart1.tv_sec + (tend1.tv_usec - tstart1.tv_usec) / 1000000.0;
@@ -191,9 +202,16 @@ void ct_ct_matrix_mul_test()
     cout << "Encrypted diag-packing XW^T * Encrypted col-packing W = Encrypted diag-packing (XW^T)W. " << endl;
 
     gettimeofday(&tstart1, NULL);
-
+    cudaDeviceSynchronize();
+#if defined(MOAI_HAVE_NVTX)
+    nvtxRangePushA("moai:ct_ct_matrix_mul_diagpacking");
+#endif
     vector<PhantomCiphertext> ct_ct_mul_2 = ct_ct_matrix_mul_diagpacking(ct_ct_mul, enc_ecd_w, gal_keys, relin_keys,
                                                                          context, num_row, num_row, num_col, num_row, num_X);
+#if defined(MOAI_HAVE_NVTX)
+    cudaDeviceSynchronize();
+    nvtxRangePop();
+#endif
 
     gettimeofday(&tend1, NULL);
     double ct_ct_matrix_mul_time2 = tend1.tv_sec - tstart1.tv_sec + (tend1.tv_usec - tstart1.tv_usec) / 1000000.0;
