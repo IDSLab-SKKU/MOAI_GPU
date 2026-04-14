@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <cmath>
 
 #if defined(MOAI_HAVE_NVTX)
 #include <nvtx3/nvToolsExt.h>
@@ -10,6 +11,89 @@
 using namespace std;
 using namespace phantom;
 using namespace moai;
+
+void ct_pt_matrix_mul_sanity_test()
+{
+    cout << "Task: sanity check encode(double) fast path preserves functionality" << endl;
+
+    // Small parameters for functional verification (keep runtime small/stable).
+    EncryptionParameters parms(scheme_type::ckks);
+    size_t poly_modulus_degree = 8192;
+    parms.set_poly_modulus_degree(poly_modulus_degree);
+    parms.set_coeff_modulus(CoeffModulus::Create(poly_modulus_degree, {60, 40, 40, 60}));
+    parms.set_sparse_slots(static_cast<long>(poly_modulus_degree / 2));
+    double scale = pow(2.0, 40);
+
+    PhantomContext context(parms);
+    print_parameters(context);
+
+    PhantomSecretKey secret_key(context);
+    PhantomPublicKey public_key = secret_key.gen_publickey(context);
+
+    Decryptor decryptor(&context, &secret_key);
+    PhantomCKKSEncoder phantom_encoder(context);
+    Encoder encoder(&context, &phantom_encoder);
+    Encryptor encryptor(&context, &public_key);
+
+    const size_t slot_count = encoder.slot_count();
+
+    // Build a plaintext slot vector x and encrypt it.
+    vector<double> x(slot_count, 0.0);
+    for (size_t s = 0; s < std::min<size_t>(slot_count, 32); ++s)
+        x[s] = 0.01 * static_cast<double>(s + 1); // small non-constant values
+
+    PhantomPlaintext pt_x;
+    encoder.encode(x, scale, pt_x);
+    PhantomCiphertext ct_x;
+    encryptor.encrypt(pt_x, ct_x);
+
+    // Multiply by a broadcast scalar w via plaintext encode.
+    const double w = -0.125;
+
+    // legacy plaintext: explicit slot vector
+    PhantomPlaintext pt_w_vec;
+    vector<double> wvec(slot_count, w);
+    encoder.encode(wvec, ct_x.params_id(), ct_x.scale(), pt_w_vec);
+
+    // fast plaintext: scalar encode (uniform path)
+    PhantomPlaintext pt_w_uni;
+    encoder.encode(w, ct_x.params_id(), ct_x.scale(), pt_w_uni);
+
+    Evaluator evaluator(&context, &phantom_encoder);
+    PhantomCiphertext ct_y_vec, ct_y_uni;
+    evaluator.multiply_plain(ct_x, pt_w_vec, ct_y_vec);
+    evaluator.multiply_plain(ct_x, pt_w_uni, ct_y_uni);
+
+    PhantomPlaintext p_y_vec, p_y_uni;
+    decryptor.decrypt(ct_y_vec, p_y_vec);
+    decryptor.decrypt(ct_y_uni, p_y_uni);
+
+    vector<double> y_vec, y_uni;
+    encoder.decode(p_y_vec, y_vec);
+    encoder.decode(p_y_uni, y_uni);
+
+    double max_err_vec = 0.0;
+    double max_err_uni = 0.0;
+    double max_diff = 0.0;
+    for (size_t s = 0; s < std::min<size_t>(slot_count, 32); ++s)
+    {
+        const double expected = x[s] * w;
+        max_err_vec = std::max(max_err_vec, std::fabs(y_vec[s] - expected));
+        max_err_uni = std::max(max_err_uni, std::fabs(y_uni[s] - expected));
+        max_diff = std::max(max_diff, std::fabs(y_uni[s] - y_vec[s]));
+    }
+
+    const double tol = 1e-3;
+    cout << "[SANITY] w=" << w << " tol=" << tol << endl;
+    cout << "[SANITY] max_abs_err_vs_expected (legacy vec) = " << max_err_vec << endl;
+    cout << "[SANITY] max_abs_err_vs_expected (fast uni)   = " << max_err_uni << endl;
+    cout << "[SANITY] max_abs_diff(fast,legacy)           = " << max_diff << endl;
+
+    if (max_err_vec <= tol && max_err_uni <= tol && max_diff <= tol)
+        cout << "[SANITY] PASS" << endl;
+    else
+        cout << "[SANITY] FAIL" << endl;
+}
 
 void ct_pt_matrix_mul_test()
 {
@@ -107,6 +191,51 @@ void ct_pt_matrix_mul_test()
     vector<vector<double>> W(num_col, vector<double>(col_W, 1.0 / 128.0));
     cout << "Matrix W size = " << num_col << " * " << col_W << endl;
 
+    // Optional encoder equivalence check (no decrypt involved):
+    // Compare plaintext coeffs produced by legacy slot-vector encode vs uniform fast path.
+    // Enable: MOAI_ENC_EQ_CHECK=1
+    if (const char *ev = std::getenv("MOAI_ENC_EQ_CHECK"); ev && std::strcmp(ev, "1") == 0)
+    {
+        cout << "[MOAI_ENC_EQ] Checking encode equivalence (legacy vec vs uniform scalar)..." << endl;
+        const double w = W[0][0];
+        PhantomPlaintext pt_vec, pt_uni;
+
+        // (1) legacy: explicit slot vector
+        vector<double> wvec(slot_count, w);
+        encoder.encode(wvec, enc_ecd_x[0].params_id(), enc_ecd_x[0].scale(), pt_vec);
+
+        // (2) uniform fast path: scalar encode (routes to encode_uniform_real)
+        encoder.encode(w, enc_ecd_x[0].params_id(), enc_ecd_x[0].scale(), pt_uni);
+
+        const size_t coeff_mod_size = context.get_context_data(enc_ecd_x[0].params_id()).parms().coeff_modulus().size();
+        const size_t poly_degree = context.get_context_data(enc_ecd_x[0].params_id()).parms().poly_modulus_degree();
+        const size_t n_u64 = coeff_mod_size * poly_degree;
+
+        vector<uint64_t> h_vec(n_u64), h_uni(n_u64);
+        cudaMemcpy(h_vec.data(), pt_vec.data(), n_u64 * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+        cudaMemcpy(h_uni.data(), pt_uni.data(), n_u64 * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+
+        size_t diff_cnt = 0;
+        size_t first_diff = static_cast<size_t>(-1);
+        for (size_t i = 0; i < n_u64; ++i)
+        {
+            if (h_vec[i] != h_uni[i])
+            {
+                if (diff_cnt == 0) first_diff = i;
+                diff_cnt++;
+            }
+        }
+        cout << "[MOAI_ENC_EQ] coeff_u64_count=" << n_u64
+             << " diff_cnt=" << diff_cnt;
+        if (diff_cnt)
+        {
+            cout << " first_diff_idx=" << first_diff
+                 << " vec=" << h_vec[first_diff]
+                 << " uni=" << h_uni[first_diff];
+        }
+        cout << endl;
+    }
+
     /*
     //encode W
     vector<vector<Plaintext>> ecd_w(num_col,vector<Plaintext>(col_W));
@@ -141,6 +270,58 @@ void ct_pt_matrix_mul_test()
     cout << "Ct-Pt matrix multiplication time = " << duration.count() << " ms" << endl;
     cout << "Modulus chain index for the result: " << context.get_context_data(ct_pt_mul[0].params_id()).chain_depth() << endl;
     append_csv_row("../results.csv", "ct_pt_matrix_mul_without_preprocessing", duration.count() / 1000.0);
+
+    // Optional correctness check: compare fast-path (current) vs legacy scalar-encode path.
+    // Enable: MOAI_CT_PT_CHECK=1
+    if (const char *ev = std::getenv("MOAI_CT_PT_CHECK"); ev && std::strcmp(ev, "1") == 0)
+    {
+        cout << "[MOAI_CHECK] Running legacy scalar-encode reference..." << endl;
+        vector<PhantomCiphertext> ct_pt_mul_legacy =
+            ct_pt_matrix_mul_wo_pre_legacy_scalar_encode(enc_ecd_x, W, num_col, col_W, num_col, context);
+
+        const double expected = 64.5; // sum_{r=1..128} r / 128 = 64.5 (given input_x[j][k][i] = (double)k+1, W=1/128)
+        const double abs_tol = 1e-3;
+        double max_abs_err_fast = 0.0;
+        double max_abs_err_legacy = 0.0;
+        double max_abs_diff = 0.0;
+
+        // Check a few output columns to keep runtime reasonable.
+        for (int out_i = 0; out_i < std::min(8, col_W); ++out_i)
+        {
+            PhantomPlaintext plain_fast, plain_legacy;
+            decryptor.decrypt(ct_pt_mul[out_i], plain_fast);
+            decryptor.decrypt(ct_pt_mul_legacy[out_i], plain_legacy);
+
+            vector<double> v_fast, v_legacy;
+            encoder.decode(plain_fast, v_fast);
+            encoder.decode(plain_legacy, v_legacy);
+
+            for (size_t s = 0; s < v_fast.size() && s < v_legacy.size(); ++s)
+            {
+                const double ef = std::fabs(v_fast[s] - expected);
+                const double el = std::fabs(v_legacy[s] - expected);
+                const double ed = std::fabs(v_fast[s] - v_legacy[s]);
+                max_abs_err_fast = std::max(max_abs_err_fast, ef);
+                max_abs_err_legacy = std::max(max_abs_err_legacy, el);
+                max_abs_diff = std::max(max_abs_diff, ed);
+            }
+        }
+
+        cout << "[MOAI_CHECK] max_abs_err_vs_expected (fast)   = " << max_abs_err_fast << endl;
+        cout << "[MOAI_CHECK] max_abs_err_vs_expected (legacy) = " << max_abs_err_legacy << endl;
+        cout << "[MOAI_CHECK] max_abs_diff(fast,legacy)        = " << max_abs_diff << endl;
+
+        if (max_abs_diff > abs_tol)
+        {
+            cout << "[MOAI_CHECK] WARNING: fast vs legacy diff exceeds abs_tol=" << abs_tol << endl;
+        }
+        if (max_abs_err_fast > 1.0 || max_abs_err_legacy > 1.0)
+        {
+            cout << "[MOAI_CHECK] WARNING: decoded values are far from expected=" << expected
+                 << " (check scale/params alignment)" << endl;
+        }
+    }
+
     cout << "Decrypt + decode result: " << endl;
     // decrypt and decode
     for (int i = 0; i < 32; ++i)

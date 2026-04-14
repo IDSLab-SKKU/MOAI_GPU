@@ -251,7 +251,7 @@ void PhantomCKKSEncoder::decode_internal(const PhantomContext &context, const Ph
 namespace {
 
 struct CkksUniformSlotBasisCache {
-    phantom::util::cuda_auto_ptr<cuDoubleComplex> basis{};
+    cuDoubleComplex *basis = nullptr; // device pointer; intentionally leaked for process lifetime
     double max_abs = 0.0;
 };
 
@@ -277,18 +277,20 @@ const CkksUniformSlotBasisCache &get_ckks_uniform_basis(uint32_t slots, DCKKSEnc
     auto [it, inserted] = g_ckks_uniform_basis_by_slots.try_emplace(slots);
     CkksUniformSlotBasisCache &cache = it->second;
     if (inserted) {
-        cache.basis = make_cuda_auto_ptr<cuDoubleComplex>(slots, stream);
+        // Use cudaMalloc (not cudaMallocAsync) to ensure the pointer is usable across streams without
+        // relying on stream-ordered allocation semantics.
+        PHANTOM_CHECK_CUDA(cudaMalloc(reinterpret_cast<void **>(&cache.basis), slots * sizeof(cuDoubleComplex)));
         gp.set_sparse_slots(slots);
         PHANTOM_CHECK_CUDA(cudaMemsetAsync(gp.in(), 0, slots * sizeof(cuDoubleComplex), stream));
         const uint32_t grid = (slots + blockDimGlb.x - 1) / blockDimGlb.x;
         ckks_fill_unit_real_kernel<<<grid, blockDimGlb, 0, stream>>>(gp.in(), slots);
         special_fft_backward(gp, 1.0, stream);
-        PHANTOM_CHECK_CUDA(cudaMemcpyAsync(cache.basis.get(), gp.in(), slots * sizeof(cuDoubleComplex),
+        PHANTOM_CHECK_CUDA(cudaMemcpyAsync(cache.basis, gp.in(), slots * sizeof(cuDoubleComplex),
                                            cudaMemcpyDeviceToDevice, stream));
         PHANTOM_CHECK_CUDA(cudaStreamSynchronize(stream));
         vector<cuDoubleComplex> host(slots);
         PHANTOM_CHECK_CUDA(
-                cudaMemcpy(host.data(), cache.basis.get(), slots * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
+                cudaMemcpy(host.data(), cache.basis, slots * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
         for (uint32_t i = 0; i < slots; ++i) {
             cache.max_abs = std::max(cache.max_abs, std::fabs(host[i].x));
             cache.max_abs = std::max(cache.max_abs, std::fabs(host[i].y));
@@ -328,7 +330,7 @@ void PhantomCKKSEncoder::encode_internal_uniform_real(const PhantomContext &cont
     const double scaled_value = value * fix;
     const uint32_t grid_dim = (slots_ + blockDimGlb.x - 1) / blockDimGlb.x;
     ckks_scale_complex_by_real_kernel<<<grid_dim, blockDimGlb, 0, stream>>>(
-            basis_cache.basis.get(), gpu_ckks_msg_vec_->in(), slots_, scaled_value);
+            basis_cache.basis, gpu_ckks_msg_vec_->in(), slots_, scaled_value);
 
     const double max_coeff = std::fabs(scaled_value) * basis_cache.max_abs;
     const int max_coeff_bit_count = static_cast<int>(std::ceil(std::log2(std::max(max_coeff, 1.0)))) + 1;

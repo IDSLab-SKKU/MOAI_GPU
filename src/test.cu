@@ -37,6 +37,10 @@ int main()
             ct_pt_matrix_mul_test();
             return 0;
         }
+        if (std::strcmp(bench, "ct_pt_sanity") == 0) {
+            ct_pt_matrix_mul_sanity_test();
+            return 0;
+        }
         if (std::strcmp(bench, "ct_pt_pre") == 0) {
             ct_pt_matrix_mul_w_preprocess_test();
             return 0;
@@ -66,7 +70,7 @@ int main()
             return 0;
         }
         std::cerr << "MOAI_BENCH_MODE='" << bench
-                  << "' — use boot | bootstrap_micro | ct_pt | ct_pt_pre | ct_ct | softmax_micro | softmax | "
+                  << "' — use boot | bootstrap_micro | ct_pt | ct_pt_sanity | ct_pt_pre | ct_ct | softmax_micro | softmax | "
                      "softmax_boot | gelu | "
                      "layernorm | "
                      "(unset for single_layer)\n";

@@ -149,6 +149,103 @@ inline vector<PhantomCiphertext> ct_pt_matrix_mul_wo_pre(
   return output;
 }
 
+// Legacy/reference implementation for correctness checks:
+// encode scalar W[j][i] by explicitly building a full slot vector, i.e. the pre-fast-path behavior.
+inline vector<PhantomCiphertext> ct_pt_matrix_mul_wo_pre_legacy_scalar_encode(
+    vector<PhantomCiphertext> &enc_X,
+    const vector<vector<double>> &W,
+    int col_X, int col_W, int row_W,
+    PhantomContext &context)
+{
+  vector<PhantomCiphertext> output(static_cast<size_t>(col_W));
+
+  if (enc_X.empty() || W.empty() || col_W <= 0 || row_W <= 0)
+  {
+    std::cout << "ERROR: empty inputs or bad dimensions.\n";
+  }
+  if (static_cast<int>(enc_X.size()) < row_W)
+  {
+    std::cout << "ERROR: enc_X size < row_W.\n";
+    return output;
+  }
+  if (static_cast<int>(W.size()) < row_W)
+  {
+    std::cout << "ERROR: W rows < row_W.\n";
+    return output;
+  }
+  for (int r = 0; r < row_W; ++r)
+  {
+    if (static_cast<int>(W[r].size()) < col_W)
+    {
+      std::cout << "ERROR: W row " << r << " has fewer than col_W columns.\n";
+      return output;
+    }
+  }
+  if (col_X != row_W)
+  {
+    std::cout << "ERROR: bad dimensions of X or W.\n";
+    return output;
+  }
+
+  const double scale = enc_X[0].scale();
+
+  const int max_threads = omp_get_max_threads();
+  const int nthreads = std::max(1, std::min(max_threads, 32));
+
+  if (stream_pool.size() < static_cast<size_t>(nthreads))
+  {
+    stream_pool.reserve(nthreads);
+    for (size_t i = stream_pool.size(); i < static_cast<size_t>(nthreads); ++i)
+    {
+      stream_pool.emplace_back();
+    }
+  }
+
+#pragma omp parallel num_threads(nthreads)
+  {
+    PhantomCKKSEncoder phantom_encoder_local(context);
+    moai::Encoder encoder_local(&context, &phantom_encoder_local);
+    moai::Evaluator evaluator_local(&context, &phantom_encoder_local);
+
+    const int tid = omp_get_thread_num();
+    auto &stream = stream_pool[tid];
+
+    const size_t slot_count = encoder_local.slot_count();
+
+#pragma omp for schedule(static)
+    for (int i = 0; i < col_W; ++i)
+    {
+      PhantomPlaintext ecd_w_0_i;
+      vector<double> w0(slot_count, W[0][i]);
+      encoder_local.encode(w0, enc_X[0].params_id(), enc_X[0].scale(), ecd_w_0_i, stream);
+      bridge_to_default(stream);
+
+      PhantomCiphertext acc;
+      evaluator_local.multiply_plain(enc_X[0], ecd_w_0_i, acc);
+
+      for (int j = 1; j < row_W; ++j)
+      {
+        PhantomPlaintext ecd_w_j_i;
+        vector<double> wj(slot_count, W[j][i]);
+        encoder_local.encode(wj, enc_X[j].params_id(), enc_X[j].scale(), ecd_w_j_i, stream);
+        bridge_to_default(stream);
+
+        PhantomCiphertext tmp;
+        evaluator_local.multiply_plain(enc_X[j], ecd_w_j_i, tmp);
+        evaluator_local.add_inplace(acc, tmp);
+      }
+
+      evaluator_local.rescale_to_next_inplace(acc, stream);
+      acc.scale() = scale;
+
+      output[static_cast<size_t>(i)] = std::move(acc);
+    }
+    cudaStreamSynchronize(stream.get_stream());
+  }
+
+  return output;
+}
+
 // single thread version
 inline vector<PhantomCiphertext> ct_pt_matrix_mul_wo_pre_single(
     vector<PhantomCiphertext> &enc_X,
