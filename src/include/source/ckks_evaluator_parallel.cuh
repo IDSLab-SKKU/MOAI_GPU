@@ -1,8 +1,12 @@
 #pragma once
 
+#include <cstdlib>
+#include <cstring>
 #include <complex>
 
 #include "phantom.h"
+#include "source/sim/sim_timing.h"
+#include "source/sim/engine_model.h"
 
 namespace moai
 {
@@ -36,6 +40,16 @@ namespace moai
                        PhantomPlaintext &plain,
                        const cuda_stream_wrapper &stream_wrapper = *phantom::util::global_variables::default_stream)
     {
+      if (::moai::sim::SimTiming::enabled())
+      {
+        ::moai::sim::SimTiming::instance().record_encode();
+        (void)values;
+        (void)chain_index;
+        (void)scale;
+        (void)plain;
+        (void)stream_wrapper;
+        return;
+      }
       if (values.size() == 1)
       {
         encode(values[0], chain_index, scale, plain, stream_wrapper);
@@ -48,6 +62,15 @@ namespace moai
     inline void encode(vector<double> values, double scale, PhantomPlaintext &plain,
                        const cuda_stream_wrapper &stream_wrapper = *phantom::util::global_variables::default_stream)
     {
+      if (::moai::sim::SimTiming::enabled())
+      {
+        ::moai::sim::SimTiming::instance().record_encode();
+        (void)values;
+        (void)scale;
+        (void)plain;
+        (void)stream_wrapper;
+        return;
+      }
       if (values.size() == 1)
       {
         encode(values[0], scale, plain, stream_wrapper);
@@ -60,6 +83,15 @@ namespace moai
     inline void encode(vector<complex<double>> complex_values, double scale, PhantomPlaintext &plain,
                        const cuda_stream_wrapper &stream_wrapper = *phantom::util::global_variables::default_stream)
     {
+      if (::moai::sim::SimTiming::enabled())
+      {
+        ::moai::sim::SimTiming::instance().record_encode();
+        (void)complex_values;
+        (void)scale;
+        (void)plain;
+        (void)stream_wrapper;
+        return;
+      }
       if (complex_values.size() == 1)
       {
         encode(complex_values[0], scale, plain, stream_wrapper);
@@ -73,18 +105,57 @@ namespace moai
     inline void encode(double value, size_t chain_index, double scale, PhantomPlaintext &plain,
                        const cuda_stream_wrapper &stream_wrapper = *phantom::util::global_variables::default_stream)
     {
+      if (::moai::sim::SimTiming::enabled())
+      {
+        ::moai::sim::SimTiming::instance().record_encode();
+        if (::moai::sim::EngineModel::enabled())
+        {
+          // Encode is a VEC-side cost; model as vec coeff work at slot granularity.
+          const uint64_t slot_count = encoder->slot_count();
+          ::moai::sim::EngineModel::instance().enqueue_vec_coeffs(slot_count, ::moai::sim::SimTiming::instance().encode_vec_cycles_per_slot());
+        }
+        (void)value;
+        (void)chain_index;
+        (void)scale;
+        (void)plain;
+        (void)stream_wrapper;
+        return;
+      }
       encoder->encode_uniform_real(*context, value, scale, plain, chain_index, stream_wrapper);
     }
 
     inline void encode(double value, double scale, PhantomPlaintext &plain,
                        const cuda_stream_wrapper &stream_wrapper = *phantom::util::global_variables::default_stream)
     {
+      if (::moai::sim::SimTiming::enabled())
+      {
+        ::moai::sim::SimTiming::instance().record_encode();
+        if (::moai::sim::EngineModel::enabled())
+        {
+          const uint64_t slot_count = encoder->slot_count();
+          ::moai::sim::EngineModel::instance().enqueue_vec_coeffs(slot_count, ::moai::sim::SimTiming::instance().encode_vec_cycles_per_slot());
+        }
+        (void)value;
+        (void)scale;
+        (void)plain;
+        (void)stream_wrapper;
+        return;
+      }
       encoder->encode_uniform_real(*context, value, scale, plain, 1, stream_wrapper);
     }
 
     inline void encode(complex<double> complex_value, double scale, PhantomPlaintext &plain,
                        const cuda_stream_wrapper &stream_wrapper = *phantom::util::global_variables::default_stream)
     {
+      if (::moai::sim::SimTiming::enabled())
+      {
+        ::moai::sim::SimTiming::instance().record_encode();
+        (void)complex_value;
+        (void)scale;
+        (void)plain;
+        (void)stream_wrapper;
+        return;
+      }
       vector<complex<double>> complex_values(encoder->slot_count(), complex_value);
       encoder->encode(*context, complex_values, scale, plain, 1, stream_wrapper);
     }
@@ -120,6 +191,14 @@ namespace moai
     inline void encrypt(PhantomPlaintext &plain, PhantomCiphertext &ct,
                         const cuda_stream_wrapper &stream_wrapper = *phantom::util::global_variables::default_stream)
     {
+      if (::moai::sim::SimTiming::enabled())
+      {
+        ::moai::sim::SimTiming::instance().record_gap("Encryptor::encrypt", ::moai::sim::SimTiming::instance().gap_encrypt_calls);
+        (void)plain;
+        (void)ct;
+        (void)stream_wrapper;
+        return;
+      }
       encryptor->encrypt_asymmetric(*context, plain, ct, stream_wrapper);
     }
   };
@@ -163,6 +242,18 @@ namespace moai
     inline void mod_switch_to_next_inplace(PhantomCiphertext &ct,
                                            const cuda_stream_wrapper &stream_wrapper = *phantom::util::global_variables::default_stream)
     {
+      if (::moai::sim::SimTiming::enabled())
+      {
+        if (::moai::sim::SimTiming::gap_policy() == ::moai::sim::SimTiming::GapPolicy::Model && ::moai::sim::EngineModel::enabled())
+        {
+          ::moai::sim::EngineModel::instance().enqueue_modswitch(/*ct_size=*/2, ct.poly_modulus_degree(), ct.coeff_modulus_size());
+          return;
+        }
+        ::moai::sim::SimTiming::instance().record_gap("Evaluator::mod_switch_to_next_inplace", ::moai::sim::SimTiming::instance().gap_modswitch_calls);
+        (void)ct;
+        (void)stream_wrapper;
+        return;
+      }
 
       ::mod_switch_to_next_inplace(*context, ct);
     }
@@ -170,6 +261,20 @@ namespace moai
     inline void mod_switch_to_inplace(PhantomCiphertext &ct, size_t chain_index,
                                       const cuda_stream_wrapper &stream_wrapper = *phantom::util::global_variables::default_stream)
     {
+      if (::moai::sim::SimTiming::enabled())
+      {
+        if (::moai::sim::SimTiming::gap_policy() == ::moai::sim::SimTiming::GapPolicy::Model && ::moai::sim::EngineModel::enabled())
+        {
+          ::moai::sim::EngineModel::instance().enqueue_modswitch(/*ct_size=*/2, ct.poly_modulus_degree(), ct.coeff_modulus_size());
+          (void)chain_index;
+          return;
+        }
+        ::moai::sim::SimTiming::instance().record_gap("Evaluator::mod_switch_to_inplace(ct)", ::moai::sim::SimTiming::instance().gap_modswitch_calls);
+        (void)ct;
+        (void)chain_index;
+        (void)stream_wrapper;
+        return;
+      }
 
       ::mod_switch_to_inplace(*context, ct, chain_index, stream_wrapper);
     }
@@ -177,6 +282,24 @@ namespace moai
     inline void mod_switch_to_inplace(PhantomPlaintext &pt, size_t chain_index,
                                       const cuda_stream_wrapper &stream_wrapper = *phantom::util::global_variables::default_stream)
     {
+      if (::moai::sim::SimTiming::enabled())
+      {
+        if (::moai::sim::SimTiming::gap_policy() == ::moai::sim::SimTiming::GapPolicy::Model && ::moai::sim::EngineModel::enabled())
+        {
+          // Plaintext modswitch: approximate as vec work; bytes unknown here, treat as 0.
+          const uint64_t slot_count = encoder->slot_count();
+          ::moai::sim::EngineModel::instance().enqueue_vec_coeffs(slot_count, 1);
+          (void)pt;
+          (void)chain_index;
+          (void)stream_wrapper;
+          return;
+        }
+        ::moai::sim::SimTiming::instance().record_gap("Evaluator::mod_switch_to_inplace(pt)", ::moai::sim::SimTiming::instance().gap_modswitch_calls);
+        (void)pt;
+        (void)chain_index;
+        (void)stream_wrapper;
+        return;
+      }
 
       ::mod_switch_to_inplace(*context, pt, chain_index);
     }
@@ -184,6 +307,19 @@ namespace moai
     inline void rescale_to_next_inplace(PhantomCiphertext &ct,
                                         const cuda_stream_wrapper &stream_wrapper = *phantom::util::global_variables::default_stream)
     {
+      if (::moai::sim::SimTiming::enabled())
+      {
+        ::moai::sim::SimTiming::instance().record_rescale(ct.poly_modulus_degree(), ct.coeff_modulus_size());
+        if (::moai::sim::EngineModel::enabled())
+        {
+          // Assume ct_size=2 for CKKS in ct_pt; higher-level ops can override via env in estimator paths.
+          ::moai::sim::EngineModel::instance().enqueue_rescale(
+              /*ct_size=*/2, ct.poly_modulus_degree(), ct.coeff_modulus_size());
+        }
+        (void)ct;
+        (void)stream_wrapper;
+        return;
+      }
 
       ::rescale_to_next_inplace(*context, ct, stream_wrapper);
     }
@@ -192,6 +328,21 @@ namespace moai
     inline void relinearize_inplace(PhantomCiphertext &ct, const PhantomRelinKey &relin_keys,
                                     const cuda_stream_wrapper &stream_wrapper = *phantom::util::global_variables::default_stream)
     {
+      if (::moai::sim::SimTiming::enabled())
+      {
+        if (::moai::sim::SimTiming::gap_policy() == ::moai::sim::SimTiming::GapPolicy::Model && ::moai::sim::EngineModel::enabled())
+        {
+          ::moai::sim::EngineModel::instance().enqueue_relinearize(/*ct_size=*/2, ct.poly_modulus_degree(), ct.coeff_modulus_size());
+          (void)relin_keys;
+          (void)stream_wrapper;
+          return;
+        }
+        ::moai::sim::SimTiming::instance().record_gap("Evaluator::relinearize_inplace", ::moai::sim::SimTiming::instance().gap_relin_calls);
+        (void)ct;
+        (void)relin_keys;
+        (void)stream_wrapper;
+        return;
+      }
 
       ::relinearize_inplace(*context, ct, relin_keys, stream_wrapper);
     }
@@ -233,6 +384,19 @@ namespace moai
     inline void multiply_plain(PhantomCiphertext &ct, PhantomPlaintext &plain, PhantomCiphertext &dest,
                                const cuda_stream_wrapper &stream_wrapper = *phantom::util::global_variables::default_stream)
     {
+      if (::moai::sim::SimTiming::enabled())
+      {
+        ::moai::sim::SimTiming::instance().record_multiply_plain(ct.poly_modulus_degree(), ct.coeff_modulus_size());
+        if (::moai::sim::EngineModel::enabled())
+        {
+          ::moai::sim::EngineModel::instance().enqueue_multiply_plain(
+              /*ct_size=*/2, ct.poly_modulus_degree(), ct.coeff_modulus_size());
+        }
+        dest = ct;
+        (void)plain;
+        (void)stream_wrapper;
+        return;
+      }
 
       // ::mod_switch_to_inplace(*context, plain, ct.params_id());
       // dest = ct;
@@ -272,6 +436,18 @@ namespace moai
     inline void add_inplace(PhantomCiphertext &ct1, const PhantomCiphertext &ct2,
                             const cuda_stream_wrapper &stream_wrapper = *phantom::util::global_variables::default_stream)
     {
+      if (::moai::sim::SimTiming::enabled())
+      {
+        ::moai::sim::SimTiming::instance().record_add_inplace(ct1.poly_modulus_degree(), ct1.coeff_modulus_size());
+        if (::moai::sim::EngineModel::enabled())
+        {
+          ::moai::sim::EngineModel::instance().enqueue_add_inplace(
+              /*ct_size=*/2, ct1.poly_modulus_degree(), ct1.coeff_modulus_size());
+        }
+        (void)ct2;
+        (void)stream_wrapper;
+        return;
+      }
 
       ::add_inplace(*context, ct1, ct2, stream_wrapper);
     }
@@ -331,6 +507,24 @@ namespace moai
     inline void rotate_vector(PhantomCiphertext &ct, int steps, PhantomGaloisKey &galois_keys, PhantomCiphertext &dest,
                               const cuda_stream_wrapper &stream_wrapper = *phantom::util::global_variables::default_stream)
     {
+      if (::moai::sim::SimTiming::enabled())
+      {
+        if (::moai::sim::SimTiming::gap_policy() == ::moai::sim::SimTiming::GapPolicy::Model && ::moai::sim::EngineModel::enabled())
+        {
+          ::moai::sim::EngineModel::instance().enqueue_rotate(/*ct_size=*/2, ct.poly_modulus_degree(), ct.coeff_modulus_size());
+          dest = ct;
+          (void)steps;
+          (void)galois_keys;
+          (void)stream_wrapper;
+          return;
+        }
+        ::moai::sim::SimTiming::instance().record_gap("Evaluator::rotate_vector", ::moai::sim::SimTiming::instance().gap_rotate_calls);
+        dest = ct;
+        (void)steps;
+        (void)galois_keys;
+        (void)stream_wrapper;
+        return;
+      }
 
       dest = ::rotate_vector(*context, ct, steps, galois_keys, stream_wrapper);
       cudaStreamSynchronize(ct.data_ptr().get_stream());
@@ -339,6 +533,24 @@ namespace moai
     inline void rotate_vector_inplace(PhantomCiphertext &ct, int steps, PhantomGaloisKey &galois_keys,
                                       const cuda_stream_wrapper &stream_wrapper = *phantom::util::global_variables::default_stream)
     {
+      if (::moai::sim::SimTiming::enabled())
+      {
+        if (::moai::sim::SimTiming::gap_policy() == ::moai::sim::SimTiming::GapPolicy::Model && ::moai::sim::EngineModel::enabled())
+        {
+          ::moai::sim::EngineModel::instance().enqueue_rotate(/*ct_size=*/2, ct.poly_modulus_degree(), ct.coeff_modulus_size());
+          (void)ct;
+          (void)steps;
+          (void)galois_keys;
+          (void)stream_wrapper;
+          return;
+        }
+        ::moai::sim::SimTiming::instance().record_gap("Evaluator::rotate_vector_inplace", ::moai::sim::SimTiming::instance().gap_rotate_calls);
+        (void)ct;
+        (void)steps;
+        (void)galois_keys;
+        (void)stream_wrapper;
+        return;
+      }
 
       ::rotate_vector_inplace(*context, ct, steps, galois_keys, stream_wrapper);
       cudaStreamSynchronize(ct.data_ptr().get_stream());

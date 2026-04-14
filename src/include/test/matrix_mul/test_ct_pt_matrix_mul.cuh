@@ -3,10 +3,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <fstream>
+#include <ctime>
 
 #if defined(MOAI_HAVE_NVTX)
 #include <nvtx3/nvToolsExt.h>
 #endif
+#include "source/sim/sim_timing.h"
 
 using namespace std;
 using namespace phantom;
@@ -103,12 +106,149 @@ void ct_pt_matrix_mul_test()
 
     size_t poly_modulus_degree = 65536;
     parms.set_poly_modulus_degree(poly_modulus_degree);
-    parms.set_coeff_modulus(CoeffModulus::Create(poly_modulus_degree,
-                                                 {60, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 60}));
+    const std::vector<int> coeff_bits = {60, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 40, 60};
+    parms.set_coeff_modulus(CoeffModulus::Create(poly_modulus_degree, coeff_bits));
     //{60, 40, 40, 60}));
     long sparse_slots = 32768;
     parms.set_sparse_slots(sparse_slots);
     double scale = pow(2.0, 40);
+
+    // ct_pt micro dims (W is num_col x col_W; X provides num_col ciphertexts)
+    const int num_X = 256;
+    const int num_row = 128;
+    const int num_col = 768;
+    const int col_W_bench = 64;
+
+    if (::moai::sim::SimTiming::enabled())
+    {
+        // Optional: append reports to a file for easier sweep analysis.
+        // Usage: MOAI_SIM_REPORT_PATH=/path/to/report.txt
+        const char *report_path = std::getenv("MOAI_SIM_REPORT_PATH");
+        const char *quiet_ev = std::getenv("MOAI_SIM_REPORT_QUIET");
+        const bool quiet =
+            quiet_ev != nullptr && quiet_ev[0] != '\0' && std::strcmp(quiet_ev, "0") != 0;
+        std::ofstream report_ofs;
+        if (report_path && report_path[0] != '\0')
+            report_ofs.open(report_path, std::ios::out | std::ios::app);
+        std::ostream &report_os = (report_ofs.is_open() ? report_ofs : std::cout);
+
+        // Estimator-only path: avoid allocating GPU ciphertext/plaintext buffers.
+        const uint64_t N = static_cast<uint64_t>(poly_modulus_degree);
+        const uint64_t T = static_cast<uint64_t>(coeff_bits.size());
+        const uint64_t slot_count = static_cast<uint64_t>(sparse_slots);
+        const int row_W = num_col;
+
+        // Mode:
+        // - default: fast-path scalar encode (encode_uniform_real)
+        // - MOAI_SIM_ENCODE_LEGACY=1: legacy scalar encode via full slot vector encode
+        // - MOAI_SIM_COMPARE_LEGACY=1: print both back-to-back
+        const char *cmp_ev = std::getenv("MOAI_SIM_COMPARE_LEGACY");
+        const bool compare =
+            cmp_ev != nullptr && cmp_ev[0] != '\0' && std::strcmp(cmp_ev, "0") != 0;
+        const char *leg_ev = std::getenv("MOAI_SIM_ENCODE_LEGACY");
+        const bool legacy_only =
+            leg_ev != nullptr && leg_ev[0] != '\0' && std::strcmp(leg_ev, "0") != 0;
+
+        auto run_once = [&](bool legacy) {
+            ::moai::sim::SimTiming::instance().reset();
+            if (::moai::sim::EngineModel::enabled())
+                ::moai::sim::EngineModel::instance().reset();
+            const char *once_ev = std::getenv("MOAI_SIM_ENCODE_ONCE");
+            const bool encode_once =
+                once_ev != nullptr && once_ev[0] != '\0' && std::strcmp(once_ev, "0") != 0;
+
+            if (encode_once)
+            {
+                // Model "L=1 pre-encode then reuse on-chip" for the scalar/plaintext constant path.
+                if (legacy)
+                    ::moai::sim::SimTiming::instance().record_encode_vec(slot_count);
+                else
+                    ::moai::sim::SimTiming::instance().record_encode();
+
+                if (::moai::sim::EngineModel::enabled())
+                {
+                    // Encode cost is VEC-side; represent legacy as slot_count work, uniform as 1 slot.
+                    if (legacy)
+                        ::moai::sim::EngineModel::instance().enqueue_vec_coeffs(slot_count, ::moai::sim::SimTiming::instance().encode_vec_cycles_per_slot());
+                    else
+                        ::moai::sim::EngineModel::instance().enqueue_vec_coeffs(1, ::moai::sim::SimTiming::instance().encode_cycles_per_call());
+
+                    // If on-chip is enabled, treat the encoded PT constant as resident in GlobalSPAD.
+                    const uint64_t coeffs = N * T;
+                    ::moai::sim::EngineModel::instance().mark_pt_const_resident(coeffs * sizeof(uint64_t));
+                }
+            }
+
+            for (int i = 0; i < col_W_bench; ++i)
+            {
+                for (int j = 0; j < row_W; ++j)
+                {
+                    if (!encode_once)
+                    {
+                        if (legacy)
+                            ::moai::sim::SimTiming::instance().record_encode_vec(slot_count);
+                        else
+                            ::moai::sim::SimTiming::instance().record_encode();
+
+                        if (::moai::sim::EngineModel::enabled())
+                        {
+                            if (legacy)
+                                ::moai::sim::EngineModel::instance().enqueue_vec_coeffs(slot_count, ::moai::sim::SimTiming::instance().encode_vec_cycles_per_slot());
+                            else
+                                ::moai::sim::EngineModel::instance().enqueue_vec_coeffs(1, ::moai::sim::SimTiming::instance().encode_cycles_per_call());
+                        }
+                    }
+
+                    ::moai::sim::SimTiming::instance().record_multiply_plain(N, T);
+                    if (::moai::sim::EngineModel::enabled())
+                        ::moai::sim::EngineModel::instance().enqueue_multiply_plain(/*ct_size=*/2, N, T);
+                    if (j != 0)
+                    {
+                        ::moai::sim::SimTiming::instance().record_add_inplace(N, T);
+                        if (::moai::sim::EngineModel::enabled())
+                            ::moai::sim::EngineModel::instance().enqueue_add_inplace(/*ct_size=*/2, N, T);
+                    }
+                }
+                ::moai::sim::SimTiming::instance().record_rescale(N, T);
+                if (::moai::sim::EngineModel::enabled())
+                    ::moai::sim::EngineModel::instance().enqueue_rescale(/*ct_size=*/2, N, T);
+            }
+
+            // Header separator for multi-run appends.
+            const std::time_t now = std::time(nullptr);
+            report_os << "\n=== MOAI_SIM_REPORT ct_pt_wo_pre ts=" << static_cast<long long>(now)
+                      << " encode_model=" << (legacy ? "legacy_vec" : "uniform_real")
+                      << " encode_once=" << (encode_once ? 1 : 0)
+                      << " ===\n";
+            ::moai::sim::SimTiming::instance().print_summary(report_os);
+            if (::moai::sim::EngineModel::enabled())
+                ::moai::sim::EngineModel::instance().print_summary(report_os, "ct_pt_wo_pre");
+
+            if (!quiet)
+            {
+                cout << "[MOAI_SIM_BACKEND] ct_pt_wo_pre encode_model=" << (legacy ? "legacy_vec" : "uniform_real")
+                     << " encode_once=" << (encode_once ? 1 : 0) << endl;
+                if (report_ofs.is_open())
+                    cout << "[MOAI_SIM_BACKEND] report appended to " << report_path << endl;
+                ::moai::sim::SimTiming::instance().print_summary(std::cout);
+                if (::moai::sim::EngineModel::enabled())
+                    ::moai::sim::EngineModel::instance().print_summary(std::cout, "ct_pt_wo_pre");
+            }
+        };
+
+        if (compare)
+        {
+            run_once(false);
+            run_once(true);
+        }
+        else
+        {
+            run_once(legacy_only);
+        }
+
+        cout << "[MOAI_SIM_BACKEND] (ct_pt wo_pre) finished; skipping GPU run." << endl;
+        return;
+    }
 
     PhantomContext context(parms);
 
@@ -132,9 +272,6 @@ void ct_pt_matrix_mul_test()
     // struct timeval tstart1, tend1;
 
     // construct input
-    int num_X = 256;
-    int num_row = 128;
-    int num_col = 768;
     cout << "Number of matrices in one batch = " << num_X << endl;
     vector<vector<vector<double>>> input_x(num_X, vector<vector<double>>(num_row, vector<double>(num_col, 0)));
     for (int i = 0; i < num_X; ++i)
@@ -252,9 +389,16 @@ void ct_pt_matrix_mul_test()
     //  gettimeofday(&tstart1,NULL);
     std::chrono::_V2::system_clock::time_point start = high_resolution_clock::now();
     cudaDeviceSynchronize();
+#if defined(MOAI_SIM_BACKEND)
+    (void)start;
+#endif
 #if defined(MOAI_HAVE_NVTX)
     nvtxRangePushA("moai:ct_pt_matrix_mul_wo_pre");
 #endif
+    if (::moai::sim::SimTiming::enabled())
+    {
+        ::moai::sim::SimTiming::instance().reset();
+    }
     vector<PhantomCiphertext> ct_pt_mul = ct_pt_matrix_mul_wo_pre(enc_ecd_x, W, num_col, col_W, num_col, context);
 #if defined(MOAI_HAVE_NVTX)
     cudaDeviceSynchronize();
@@ -268,6 +412,13 @@ void ct_pt_matrix_mul_test()
     std::chrono::duration<double, std::milli> duration = end - start;
     cudaDeviceSynchronize();
     cout << "Ct-Pt matrix multiplication time = " << duration.count() << " ms" << endl;
+    if (::moai::sim::SimTiming::enabled())
+    {
+        ::moai::sim::SimTiming::instance().print_summary(std::cout);
+        cout << "[MOAI_SIM_BACKEND] skipping decrypt/decode correctness checks." << endl;
+        return;
+    }
+
     cout << "Modulus chain index for the result: " << context.get_context_data(ct_pt_mul[0].params_id()).chain_depth() << endl;
     append_csv_row("../results.csv", "ct_pt_matrix_mul_without_preprocessing", duration.count() / 1000.0);
 
@@ -366,6 +517,88 @@ void ct_pt_matrix_mul_test()
 void ct_pt_matrix_mul_w_preprocess_test()
 {
     cout << "Task: test Ct-Pt matrix multiplication with preprocess in CKKS scheme: " << endl;
+
+    if (::moai::sim::SimTiming::enabled())
+    {
+        // Estimator-only path: avoid allocating GPU ciphertext/plaintext buffers.
+        const uint64_t poly_modulus_degree = 65536;
+        const uint64_t coeff_modulus_size = 4; // {60,40,40,60} in this test
+
+        // Respect the same micro mode sizing knob (used to avoid OOM on real runs).
+        const char *pre_micro = std::getenv("MOAI_CT_PT_PRE_MICRO");
+        const bool use_pre_micro =
+            pre_micro != nullptr && pre_micro[0] != '\0' && std::strcmp(pre_micro, "0") != 0;
+        const int num_col = use_pre_micro ? 256 : 768;
+        const int row_W = num_col;
+        const int col_W = use_pre_micro ? 32 : 64;
+        const int max_threads = omp_get_max_threads();
+        const int nthreads = std::max(1, std::min(max_threads, col_W));
+        const uint64_t ct_size = 2; // typical CKKS ciphertext size before relinearization
+        const char *reuse_ev = std::getenv("MOAI_SIM_PREENCODE_REUSE");
+        const bool reuse_preencoded =
+            reuse_ev != nullptr && reuse_ev[0] != '\0' && std::strcmp(reuse_ev, "0") != 0;
+
+        // Stage 1: encode W (nvtx: moai:ct_pt_pre_encode_w)
+        if (!reuse_preencoded)
+        {
+            ::moai::sim::SimTiming::instance().reset();
+            for (int i = 0; i < num_col; ++i)
+            {
+                for (int j = 0; j < col_W; ++j)
+                {
+                    ::moai::sim::SimTiming::instance().record_encode();
+                }
+            }
+            cout << "[MOAI_SIM_BACKEND] stage=ct_pt_pre_encode_w" << endl;
+            ::moai::sim::SimTiming::instance().print_summary(std::cout);
+        }
+        else
+        {
+            cout << "[MOAI_SIM_BACKEND] stage=ct_pt_pre_encode_w (cached; skipped)" << endl;
+        }
+
+        // Stage 2: matmul with pre-encoded W (nvtx: moai:ct_pt_matrix_mul_pre_encoded)
+        ::moai::sim::SimTiming::instance().reset();
+        if (::moai::sim::EngineModel::enabled())
+            ::moai::sim::EngineModel::instance().reset();
+        // Model X_local deep copies (see Ct_pt_matrix_mul.cuh: deep_copy_cipher per row_W per thread)
+        for (int t = 0; t < nthreads; ++t)
+        {
+            for (int j = 0; j < row_W; ++j)
+            {
+                ::moai::sim::SimTiming::instance().record_deep_copy_cipher(ct_size, poly_modulus_degree, coeff_modulus_size);
+                if (::moai::sim::EngineModel::enabled())
+                {
+                    const uint64_t coeffs = ct_size * poly_modulus_degree * coeff_modulus_size;
+                    ::moai::sim::EngineModel::instance().enqueue_dma(coeffs * sizeof(uint64_t));
+                }
+            }
+        }
+        for (int i = 0; i < col_W; ++i)
+        {
+            for (int j = 0; j < row_W; ++j)
+            {
+                ::moai::sim::SimTiming::instance().record_multiply_plain(poly_modulus_degree, coeff_modulus_size);
+                if (::moai::sim::EngineModel::enabled())
+                    ::moai::sim::EngineModel::instance().enqueue_multiply_plain(ct_size, poly_modulus_degree, coeff_modulus_size);
+                if (j != 0)
+                {
+                    ::moai::sim::SimTiming::instance().record_add_inplace(poly_modulus_degree, coeff_modulus_size);
+                    if (::moai::sim::EngineModel::enabled())
+                        ::moai::sim::EngineModel::instance().enqueue_add_inplace(ct_size, poly_modulus_degree, coeff_modulus_size);
+                }
+            }
+            ::moai::sim::SimTiming::instance().record_rescale(poly_modulus_degree, coeff_modulus_size);
+            if (::moai::sim::EngineModel::enabled())
+                ::moai::sim::EngineModel::instance().enqueue_rescale(ct_size, poly_modulus_degree, coeff_modulus_size);
+        }
+        cout << "[MOAI_SIM_BACKEND] stage=ct_pt_matrix_mul_pre_encoded" << endl;
+        ::moai::sim::SimTiming::instance().print_summary(std::cout);
+        if (::moai::sim::EngineModel::enabled())
+            ::moai::sim::EngineModel::instance().print_summary(std::cout, "ct_pt_pre_encoded");
+        cout << "[MOAI_SIM_BACKEND] (ct_pt pre) finished; skipping GPU run." << endl;
+        return;
+    }
 
     EncryptionParameters parms(scheme_type::ckks);
 
@@ -511,6 +744,10 @@ void ct_pt_matrix_mul_w_preprocess_test()
     nvtxRangePushA("moai:ct_pt_matrix_mul_pre_encoded");
 #endif
     std::chrono::_V2::system_clock::time_point start = high_resolution_clock::now();
+    if (::moai::sim::SimTiming::enabled())
+    {
+        ::moai::sim::SimTiming::instance().reset();
+    }
     vector<PhantomCiphertext> ct_pt_mul = ct_pt_matrix_mul(enc_ecd_x, ecd_w, num_col, col_W, num_col, context);
     std::chrono::_V2::system_clock::time_point end = high_resolution_clock::now();
 #if defined(MOAI_HAVE_NVTX)
@@ -524,6 +761,12 @@ void ct_pt_matrix_mul_w_preprocess_test()
     std::chrono::duration<double, std::milli> duration = end - start;
     cudaDeviceSynchronize();
     cout << "Ct-Pt matrix multiplication time (pre process not included) = " << duration.count() << " ms" << endl;
+    if (::moai::sim::SimTiming::enabled())
+    {
+        ::moai::sim::SimTiming::instance().print_summary(std::cout);
+        cout << "[MOAI_SIM_BACKEND] skipping decrypt/decode correctness checks." << endl;
+        return;
+    }
     cout << "Modulus chain index for the result: " << context.get_context_data(ct_pt_mul[0].params_id()).chain_depth() << endl;
 
     cout << "Decrypt + decode result: " << endl;

@@ -99,6 +99,16 @@ PhantomCiphertext deep_copy_cipher(const PhantomCiphertext &src,
                                    const PhantomContext &context,
                                    phantom::util::cuda_stream_wrapper &stream = *phantom::util::global_variables::default_stream)
 {
+    if (::moai::sim::SimTiming::enabled())
+    {
+        ::moai::sim::SimTiming::instance().record_deep_copy_cipher(src.size(), src.poly_modulus_degree(), src.coeff_modulus_size());
+        if (::moai::sim::EngineModel::enabled())
+        {
+            const uint64_t coeffs = static_cast<uint64_t>(src.size()) * src.poly_modulus_degree() * src.coeff_modulus_size();
+            ::moai::sim::EngineModel::instance().enqueue_dma(coeffs * sizeof(uint64_t));
+        }
+        return src;
+    }
     PhantomCiphertext dst;
 
     
@@ -130,6 +140,14 @@ vector<PhantomCiphertext> deep_copy_cipher(const vector<PhantomCiphertext> &src,
                                            const PhantomContext &context,
                                            phantom::util::cuda_stream_wrapper &stream = *phantom::util::global_variables::default_stream)
 {
+    if (::moai::sim::SimTiming::enabled())
+    {
+        for (size_t i = 0; i < src.size(); i++)
+        {
+            ::moai::sim::SimTiming::instance().record_deep_copy_cipher(src[i].size(), src[i].poly_modulus_degree(), src[i].coeff_modulus_size());
+        }
+        return src;
+    }
     vector<PhantomCiphertext> dst(src.size());
 
     for (size_t i = 0; i < src.size(); i++)

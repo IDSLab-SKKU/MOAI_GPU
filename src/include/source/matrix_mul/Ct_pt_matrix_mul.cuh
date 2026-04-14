@@ -134,7 +134,10 @@ inline vector<PhantomCiphertext> ct_pt_matrix_mul_wo_pre(
 
       output[static_cast<size_t>(i)] = std::move(acc);
     }
-    cudaStreamSynchronize(stream.get_stream());
+    if (!::moai::sim::SimTiming::enabled())
+    {
+      cudaStreamSynchronize(stream.get_stream());
+    }
   }
 
   // double total = 0.0;
