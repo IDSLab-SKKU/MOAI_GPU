@@ -1,9 +1,16 @@
 #pragma once
 
+#include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+
+#if !defined(_WIN32)
+#include <sys/stat.h>
+#include <sys/types.h>
+#endif
 
 namespace moai {
 namespace sim {
@@ -17,10 +24,31 @@ inline uint64_t env_u64(const char *name, uint64_t def) {
   return static_cast<uint64_t>(x);
 }
 
+// Optional positive float/double from env (MHz, GHz, etc.); returns false if unset/invalid.
+inline bool env_positive_double(const char *name, double *out) {
+  const char *v = std::getenv(name);
+  if (!v || v[0] == '\0' || !out) return false;
+  char *end = nullptr;
+  const double x = std::strtod(v, &end);
+  if (end == v || !std::isfinite(x) || x <= 0.0) return false;
+  *out = x;
+  return true;
+}
+
 inline bool env_bool(const char *name, bool def) {
   const char *v = std::getenv(name);
   if (!v || v[0] == '\0') return def;
   return std::strcmp(v, "0") != 0;
+}
+
+// floor(log2(x)) for x>=1; 0 for x<=1
+inline uint64_t floor_log2_u64(uint64_t x) {
+  uint64_t r = 0;
+  while (x > 1) {
+    x >>= 1;
+    ++r;
+  }
+  return r;
 }
 
 inline std::string fmt_bytes_iec(uint64_t bytes) {
@@ -40,17 +68,113 @@ inline std::string fmt_bytes_iec(uint64_t bytes) {
   return std::string(buf);
 }
 
+// Decimal GB/s (1e9 bytes/s), matches bandwidth_gbps units elsewhere.
+inline std::string fmt_gbps(double gbps) {
+  if (!std::isfinite(gbps) || gbps <= 0.0) return std::string("-");
+  char buf[64];
+  std::snprintf(buf, sizeof(buf), "%.2f", gbps);
+  return std::string(buf);
+}
+
+// Average transfer rate (decimal GB/s) = bytes / (cycles * period_ns as seconds) / 1e9.
+inline double avg_throughput_gbps(uint64_t bytes, uint64_t cycles, double cycle_period_ns) {
+  if (cycles == 0 || !std::isfinite(cycle_period_ns) || cycle_period_ns <= 0.0) return 0.0;
+  const double sec = static_cast<double>(cycles) * cycle_period_ns * 1e-9;
+  return static_cast<double>(bytes) / sec / 1e9;
+}
+
+// Default relative to process cwd (run from MOAI_GPU repo root): output/sim/...
+inline const char *default_sim_report_path() { return "output/sim/moai_sim_report.txt"; }
+
+inline void ensure_parent_dirs_for_file(const char *file_path) {
+#if !defined(_WIN32)
+  if (!file_path || file_path[0] == '\0') return;
+  const std::string p(file_path);
+  for (size_t i = 0; i < p.size(); ++i) {
+    if (p[i] == '/') {
+      const std::string sub = p.substr(0, i);
+      if (!sub.empty()) (void)mkdir(sub.c_str(), 0755);
+    }
+  }
+#else
+  (void)file_path;
+#endif
+}
+
+// Off-chip / HBM-style memory seen by the DMA engine (one logical transaction per enqueue_dma).
+struct ExternalMemoryConfig {
+  // Label for logs only (e.g. HBM2, HBM3, DDR5)
+  std::string kind = "HBM2";
+
+  // Streaming bandwidth (GB/s). Example: HBM2 class ~812 GB/s effective (design-dependent).
+  uint64_t bandwidth_gbps = 812;
+
+  // Fixed latency per DMA transaction:
+  // - If latency_ns > 0: use ceil(latency_ns / sim_cycle_period_ns) (double ns/cycle).
+  // - Else: use latency_cyc directly.
+  uint64_t latency_cyc = 200;
+  uint64_t latency_ns = 0;
+
+  uint64_t fixed_latency_cycles(double sim_cycle_period_ns) const {
+    if (latency_ns > 0) {
+      const double per = (!std::isfinite(sim_cycle_period_ns) || sim_cycle_period_ns <= 0.0)
+                             ? 1.0
+                             : sim_cycle_period_ns;
+      const double cyc = std::ceil(static_cast<double>(latency_ns) / per);
+      return static_cast<uint64_t>(std::max(1.0, cyc));
+    }
+    return latency_cyc;
+  }
+
+  static ExternalMemoryConfig from_env(uint64_t /*sim_cycle_ns*/) {
+    ExternalMemoryConfig c;
+    if (const char *k = std::getenv("MOAI_SIM_EXT_MEM_KIND"); k != nullptr && k[0] != '\0')
+      c.kind = k;
+
+    // BW: explicit external > legacy DMA knob > struct default
+    c.bandwidth_gbps =
+        env_u64("MOAI_SIM_EXT_MEM_BW_GBPS", env_u64("MOAI_SIM_DMA_BW_GBPS", c.bandwidth_gbps));
+
+    c.latency_ns = env_u64("MOAI_SIM_EXT_MEM_LATENCY_NS", c.latency_ns);
+
+    // Cycles: explicit external > legacy DMA latency > legacy BASE > default
+    c.latency_cyc = env_u64(
+        "MOAI_SIM_EXT_MEM_LATENCY_CYC",
+        env_u64("MOAI_SIM_DMA_LATENCY_CYC", env_u64("MOAI_SIM_DMA_BASE_CYC", c.latency_cyc)));
+
+    return c;
+  }
+};
+
 struct EngineModelConfig {
   // Timebase
-  uint64_t cycle_ns = 1;  // ns per cycle
+  // - cycle_ns: integer ns/cycle (legacy); MOAI_SIM_CYCLE_NS overrides. Used as coarse display when
+  //   no fractional period is set.
+  // - sim_cycle_period_ns: ns/cycle for xfer + latency_ns + BW print. Set by from_env():
+  //   MOAI_SIM_ENGINE_MHZ > MOAI_SIM_CYCLE_PERIOD_NS > MOAI_SIM_CYCLE_NS > these defaults.
+  //   (Header defaults apply only when those env vars are unset.)
+  uint64_t cycle_ns = 1;
+  double sim_cycle_period_ns = 1.0;
 
-  // DMA
-  uint64_t dma_base_cyc = 200;
-  uint64_t dma_bw_gbps = 1000;  // GB/s
+  // External memory (models VRAM/HBM traffic for the DMA engine)
+  ExternalMemoryConfig ext_mem{};
 
-  // Compute
-  uint64_t ntt_cyc_per_coeff = 1;
-  uint64_t vec_cyc_per_coeff = 2;
+  // NTT engine (pipeline-abstract; streaming after fill)
+  // - ntt_lanes: parallel coeff pipelines (>=1). Steady work scales as ceil(coeffs/lanes).
+  // - ntt_pipe_depth_cyc: fill / first-result latency (cycles). 0 => use floor_log2(poly_degree)
+  //   when enqueue passes poly_degree (e.g. N=2^16 -> 16 cycles).
+  // - ntt_steady_cyc_per_coeff: per wavefront step after fill (often 1 when fully pipelined).
+  // MOAI_SIM_NTT_CYC_PER_COEFF maps to ntt_steady_cyc_per_coeff (legacy name).
+  uint64_t ntt_lanes = 8;
+  uint64_t ntt_pipe_depth_cyc = 0;
+  uint64_t ntt_steady_cyc_per_coeff = 1;
+
+  // Vector engine — separate mul vs add; lanes parallelize coeff streams like NTT.
+  uint64_t vec_lanes = 8;
+  uint64_t vec_add_cyc_per_coeff = 1;
+  // Vector MUL (double-buffered assumption): fill latency is overlapped — model only steady
+  // throughput: ceil(coeffs/vec_lanes) * steady_cyc_per_wave (+ pass overhead).
+  uint64_t vec_mul_steady_cyc_per_coeff = 1;
   uint64_t rescale_cyc_per_coeff = 1;
   uint64_t modswitch_cyc_per_coeff = 1;
 
@@ -62,37 +186,112 @@ struct EngineModelConfig {
   uint64_t galois_key_bytes = 0;
   uint64_t relin_key_bytes = 0;
 
+  // CT×CT coarse model (enqueue_ct_ct_multiply): extra vec_mul waves per chunk — proxy for tensor/RNS
+  // dyadic work before relinearize (separate Evaluator call). Default 3.
+  uint64_t ct_ct_vec_mul_passes = 3;
+
+  // Keyswitch (Phantom eval_key_switch.cu keyswitch_inplace + rns_bconv DRNSTool::modup / moddown_from_NTT, CKKS).
+  // |P| = count of special moduli (typically 1). beta = digit count; 0 => ceil(|Ql|/|P|) with |Ql| = limbs.
+  uint64_t kswitch_size_p = 1;
+  uint64_t kswitch_beta = 0;
+  uint64_t kswitch_modup_bconv_cyc_per_coeff = 1;
+  uint64_t kswitch_moddown_bconv_cyc_per_coeff = 1;
+  // apply_galois_ntt on c0 then c1 (evaluate.cu apply_galois_inplace, CKKS).
+  uint64_t galois_perm_cyc_per_coeff = 1;
+
   static EngineModelConfig from_env() {
     EngineModelConfig c;
     c.cycle_ns = env_u64("MOAI_SIM_CYCLE_NS", c.cycle_ns);
-    c.dma_base_cyc = env_u64("MOAI_SIM_DMA_BASE_CYC", c.dma_base_cyc);
-    c.dma_bw_gbps = env_u64("MOAI_SIM_DMA_BW_GBPS", c.dma_bw_gbps);
-    c.ntt_cyc_per_coeff = env_u64("MOAI_SIM_NTT_CYC_PER_COEFF", c.ntt_cyc_per_coeff);
-    c.vec_cyc_per_coeff = env_u64("MOAI_SIM_VEC_CYC_PER_COEFF", c.vec_cyc_per_coeff);
+    c.sim_cycle_period_ns = static_cast<double>(c.cycle_ns);
+
+    // Fractional ns/cycle (e.g. 3.3) without going through MHz.
+    double period_ns = 0.0;
+    if (env_positive_double("MOAI_SIM_CYCLE_PERIOD_NS", &period_ns)) {
+      c.sim_cycle_period_ns = period_ns;
+      c.cycle_ns = std::max<uint64_t>(1, static_cast<uint64_t>(std::llround(c.sim_cycle_period_ns)));
+    }
+
+    // Clock: MOAI_SIM_ENGINE_MHZ wins over MOAI_SIM_CYCLE_PERIOD_NS / integer cycle_ns.
+    double mhz = 0.0;
+    if (env_positive_double("MOAI_SIM_ENGINE_MHZ", &mhz)) {
+      c.sim_cycle_period_ns = 1000.0 / mhz;
+      c.cycle_ns = std::max<uint64_t>(1, static_cast<uint64_t>(std::llround(c.sim_cycle_period_ns)));
+    }
+
+    c.ext_mem = ExternalMemoryConfig::from_env(c.cycle_ns);
+    c.ntt_lanes = env_u64("MOAI_SIM_NTT_LANES", c.ntt_lanes);
+    c.ntt_pipe_depth_cyc = env_u64("MOAI_SIM_NTT_PIPE_DEPTH_CYC", c.ntt_pipe_depth_cyc);
+    c.ntt_steady_cyc_per_coeff =
+        env_u64("MOAI_SIM_NTT_STEADY_CYC_PER_COEFF", env_u64("MOAI_SIM_NTT_CYC_PER_COEFF", c.ntt_steady_cyc_per_coeff));
+    c.vec_lanes = env_u64("MOAI_SIM_VEC_LANES", c.vec_lanes);
+    c.vec_add_cyc_per_coeff = env_u64("MOAI_SIM_VEC_ADD_CYC_PER_COEFF", c.vec_add_cyc_per_coeff);
+    c.vec_mul_steady_cyc_per_coeff = env_u64(
+        "MOAI_SIM_VEC_MUL_STEADY_CYC_PER_COEFF",
+        env_u64("MOAI_SIM_VEC_MUL_CYC_PER_COEFF", env_u64("MOAI_SIM_VEC_CYC_PER_COEFF", c.vec_mul_steady_cyc_per_coeff)));
     c.rescale_cyc_per_coeff = env_u64("MOAI_SIM_RESCALE_CYC_PER_COEFF", c.rescale_cyc_per_coeff);
     c.modswitch_cyc_per_coeff = env_u64("MOAI_SIM_MODSWITCH_CYC_PER_COEFF", c.modswitch_cyc_per_coeff);
     c.ntt_pass_overhead_cyc = env_u64("MOAI_SIM_NTT_PASS_OVERHEAD_CYC", c.ntt_pass_overhead_cyc);
     c.vec_pass_overhead_cyc = env_u64("MOAI_SIM_VEC_PASS_OVERHEAD_CYC", c.vec_pass_overhead_cyc);
     c.galois_key_bytes = env_u64("MOAI_SIM_GALOIS_KEY_BYTES", c.galois_key_bytes);
     c.relin_key_bytes = env_u64("MOAI_SIM_RELIN_KEY_BYTES", c.relin_key_bytes);
+    c.ct_ct_vec_mul_passes = env_u64("MOAI_SIM_CT_CT_VEC_MUL_PASSES", c.ct_ct_vec_mul_passes);
+    c.ct_ct_vec_mul_passes = std::max<uint64_t>(1ULL, c.ct_ct_vec_mul_passes);
+    c.kswitch_size_p = std::max<uint64_t>(1ULL, env_u64("MOAI_SIM_KSWITCH_SIZE_P", c.kswitch_size_p));
+    c.kswitch_beta = env_u64("MOAI_SIM_KSWITCH_BETA", c.kswitch_beta);
+    c.kswitch_modup_bconv_cyc_per_coeff =
+        env_u64("MOAI_SIM_KSWITCH_MODUP_BCONV_CYC_PER_COEFF", c.kswitch_modup_bconv_cyc_per_coeff);
+    c.kswitch_moddown_bconv_cyc_per_coeff =
+        env_u64("MOAI_SIM_KSWITCH_MODDOWN_BCONV_CYC_PER_COEFF", c.kswitch_moddown_bconv_cyc_per_coeff);
+    c.galois_perm_cyc_per_coeff = env_u64("MOAI_SIM_GALOIS_PERM_CYC_PER_COEFF", c.galois_perm_cyc_per_coeff);
     return c;
   }
 };
+
+// Same formulas as EngineModel ntt_service_cycles / vec lane waves (for SimTiming alignment).
+inline uint64_t estimate_ntt_cycles(uint64_t coeffs, uint64_t poly_degree) {
+  const EngineModelConfig cfg = EngineModelConfig::from_env();
+  const uint64_t lanes = std::max<uint64_t>(1ULL, cfg.ntt_lanes);
+  uint64_t fill = cfg.ntt_pipe_depth_cyc;
+  if (fill == 0 && poly_degree >= 2) fill = floor_log2_u64(poly_degree);
+  const uint64_t waves = (coeffs + lanes - 1) / lanes;
+  return cfg.ntt_pass_overhead_cyc + fill + waves * cfg.ntt_steady_cyc_per_coeff;
+}
+
+inline uint64_t estimate_vec_pipeline_cycles(uint64_t coeffs, uint64_t cyc_per_coeff_elem) {
+  const EngineModelConfig cfg = EngineModelConfig::from_env();
+  const uint64_t lanes = std::max<uint64_t>(1ULL, cfg.vec_lanes);
+  const uint64_t waves = (coeffs + lanes - 1) / lanes;
+  return cfg.vec_pass_overhead_cyc + waves * cyc_per_coeff_elem;
+}
+
+inline uint64_t estimate_vec_mul_cycles(uint64_t coeffs) {
+  const EngineModelConfig cfg = EngineModelConfig::from_env();
+  const uint64_t lanes = std::max<uint64_t>(1ULL, cfg.vec_lanes);
+  const uint64_t waves = (coeffs + lanes - 1) / lanes;
+  return cfg.vec_pass_overhead_cyc + waves * cfg.vec_mul_steady_cyc_per_coeff;
+}
+
+// Coarse CT×CT multiply (matches enqueue_ct_ct_multiply off-chip shape: NTT + K×vec + NTT).
+inline uint64_t estimate_ct_ct_multiply_cycles(uint64_t coeffs, uint64_t poly_degree) {
+  const EngineModelConfig cfg = EngineModelConfig::from_env();
+  const uint64_t K = std::max<uint64_t>(1ULL, cfg.ct_ct_vec_mul_passes);
+  return 2 * estimate_ntt_cycles(coeffs, poly_degree) + K * estimate_vec_mul_cycles(coeffs);
+}
 
 struct OnChipConfig {
   // Global SPAD
   uint64_t gspad_bytes = 10ULL * 1024ULL * 1024ULL;  // default 10MB
   uint64_t gspad_bw_gbps = 5000;  // GB/s
   uint64_t gspad_base_cyc = 1;
-  uint64_t gspad_banks = 1;
+  uint64_t gspad_banks = 8;
 
-  // RFs
-  uint64_t vec_rf_bytes = 0;
+  // RFs (engine-local scratch); default ~64KiB each, 8 banks (effective BW = bw * banks)
+  uint64_t vec_rf_bytes = 64ULL * 1024ULL;
   uint64_t vec_rf_bw_gbps = 10000;
-  uint64_t vec_rf_banks = 1;
-  uint64_t ntt_rf_bytes = 0;
+  uint64_t vec_rf_banks = 8;
+  uint64_t ntt_rf_bytes = 64ULL * 1024ULL;
   uint64_t ntt_rf_bw_gbps = 10000;
-  uint64_t ntt_rf_banks = 1;
+  uint64_t ntt_rf_banks = 8;
 
   static OnChipConfig from_env() {
     OnChipConfig c;

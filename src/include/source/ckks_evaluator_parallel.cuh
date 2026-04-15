@@ -377,6 +377,18 @@ namespace moai
     inline void multiply_inplace(PhantomCiphertext &ct1, const PhantomCiphertext &ct2,
                                  const cuda_stream_wrapper &stream_wrapper = *phantom::util::global_variables::default_stream)
     {
+      if (::moai::sim::SimTiming::enabled())
+      {
+        ::moai::sim::SimTiming::instance().record_ct_ct_multiply(ct1.poly_modulus_degree(), ct1.coeff_modulus_size());
+        if (::moai::sim::EngineModel::enabled())
+        {
+          ::moai::sim::EngineModel::instance().enqueue_ct_ct_multiply(
+              /*ct_size=*/2, ct1.poly_modulus_degree(), ct1.coeff_modulus_size());
+        }
+        (void)ct2;
+        (void)stream_wrapper;
+        return;
+      }
 
       ::multiply_inplace(*context, ct1, ct2, stream_wrapper);
     }

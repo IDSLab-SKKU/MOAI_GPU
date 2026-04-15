@@ -105,7 +105,7 @@ PhantomCiphertext deep_copy_cipher(const PhantomCiphertext &src,
         if (::moai::sim::EngineModel::enabled())
         {
             const uint64_t coeffs = static_cast<uint64_t>(src.size()) * src.poly_modulus_degree() * src.coeff_modulus_size();
-            ::moai::sim::EngineModel::instance().enqueue_dma(coeffs * sizeof(uint64_t));
+            ::moai::sim::EngineModel::instance().enqueue_dma_d2d(coeffs * sizeof(uint64_t));
         }
         return src;
     }

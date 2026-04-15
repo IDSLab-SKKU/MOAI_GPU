@@ -18,6 +18,13 @@ using namespace moai;
 int main()
 {
     // Micro-benchmarks only (fixed CKKS params inside each test; no MOAI_ALPHA):
+    //   Sim reports (MOAI_SIM_BACKEND=1): default append file is output/sim/moai_sim_report.txt (cwd-relative).
+    //   You must set MOAI_BENCH_MODE below; plain ./build/test does not run ct_pt.
+    //   CT×CT knobs: MOAI_SIM_CT_CT_VEC_MUL_PASSES (default 3, coarse tensor/RNS proxy in enqueue_ct_ct_multiply).
+    //   Keyswitch (Phantom-aligned coarse): MOAI_SIM_KSWITCH_SIZE_P, MOAI_SIM_KSWITCH_BETA (0=auto ceil(|Ql|/|P|)),
+    //   MOAI_SIM_KSWITCH_MODUP_BCONV_CYC_PER_COEFF, MOAI_SIM_KSWITCH_MODDOWN_BCONV_CYC_PER_COEFF, MOAI_SIM_GALOIS_PERM_CYC_PER_COEFF.
+    //   Rotate/relin through Evaluator use EngineModel only when MOAI_SIM_GAP_POLICY=model; ct_ct estimator calls
+    //   enqueue_rotate / enqueue_relinearize directly so engine sees relin/rotate traffic regardless.
     //   MOAI_BENCH_MODE=boot | bootstrap_micro -> bootstrapping_test() (nsys: src/scripts/profile_bootstrap_micro.sh)
     //   MOAI_BENCH_MODE=ct_pt      -> ct_pt_matrix_mul_test() (wo_pre; nsys: profile_ct_pt_micro.sh)
     //   MOAI_BENCH_MODE=ct_pt_pre  -> ct_pt_matrix_mul_w_preprocess_test() (ecd W; nsys: profile_ct_pt_pre_micro.sh)

@@ -5,6 +5,13 @@
 #include <cmath>
 #include <fstream>
 #include <ctime>
+#include <string>
+
+#if !defined(_WIN32)
+#include <unistd.h>
+#endif
+
+#include "source/sim/engine_config.h"
 
 #if defined(MOAI_HAVE_NVTX)
 #include <nvtx3/nvToolsExt.h>
@@ -121,16 +128,31 @@ void ct_pt_matrix_mul_test()
 
     if (::moai::sim::SimTiming::enabled())
     {
-        // Optional: append reports to a file for easier sweep analysis.
-        // Usage: MOAI_SIM_REPORT_PATH=/path/to/report.txt
-        const char *report_path = std::getenv("MOAI_SIM_REPORT_PATH");
+        // Append reports under output/sim/ by default (cwd = MOAI_GPU repo root).
+        // Override: MOAI_SIM_REPORT_PATH=/path/to/report.txt
+        // Engine clock / BW: MOAI_SIM_ENGINE_MHZ > MOAI_SIM_CYCLE_PERIOD_NS (double ns/cyc) > MOAI_SIM_CYCLE_NS (int)
+        const char *report_ev = std::getenv("MOAI_SIM_REPORT_PATH");
+        const std::string report_file =
+            (report_ev != nullptr && report_ev[0] != '\0') ? std::string(report_ev)
+                                                         : std::string(::moai::sim::default_sim_report_path());
+        ::moai::sim::ensure_parent_dirs_for_file(report_file.c_str());
+        std::ofstream report_ofs(report_file.c_str(), std::ios::out | std::ios::app);
+        const bool report_ok = report_ofs.is_open();
+        std::ostream &report_os = report_ok ? report_ofs : std::cout;
+
         const char *quiet_ev = std::getenv("MOAI_SIM_REPORT_QUIET");
         const bool quiet =
             quiet_ev != nullptr && quiet_ev[0] != '\0' && std::strcmp(quiet_ev, "0") != 0;
-        std::ofstream report_ofs;
-        if (report_path && report_path[0] != '\0')
-            report_ofs.open(report_path, std::ios::out | std::ios::app);
-        std::ostream &report_os = (report_ofs.is_open() ? report_ofs : std::cout);
+
+#if !defined(_WIN32)
+        {
+          char cwd_buf[4096];
+          if (getcwd(cwd_buf, sizeof(cwd_buf)) != nullptr)
+            cout << "[MOAI_SIM_BACKEND] cwd=" << cwd_buf << endl;
+        }
+#endif
+        cout << "[MOAI_SIM_BACKEND] sim_report path=" << report_file
+             << " opened=" << (report_ok ? "yes" : "NO") << endl;
 
         // Estimator-only path: avoid allocating GPU ciphertext/plaintext buffers.
         const uint64_t N = static_cast<uint64_t>(poly_modulus_degree);
@@ -224,12 +246,16 @@ void ct_pt_matrix_mul_test()
             if (::moai::sim::EngineModel::enabled())
                 ::moai::sim::EngineModel::instance().print_summary(report_os, "ct_pt_wo_pre");
 
+            if (report_ok) report_ofs.flush();
+
             if (!quiet)
             {
                 cout << "[MOAI_SIM_BACKEND] ct_pt_wo_pre encode_model=" << (legacy ? "legacy_vec" : "uniform_real")
                      << " encode_once=" << (encode_once ? 1 : 0) << endl;
-                if (report_ofs.is_open())
-                    cout << "[MOAI_SIM_BACKEND] report appended to " << report_path << endl;
+                if (report_ok)
+                    cout << "[MOAI_SIM_BACKEND] report appended to " << report_file << endl;
+                else
+                    cerr << "[MOAI_SIM_BACKEND] warning: could not open report file " << report_file << endl;
                 ::moai::sim::SimTiming::instance().print_summary(std::cout);
                 if (::moai::sim::EngineModel::enabled())
                     ::moai::sim::EngineModel::instance().print_summary(std::cout, "ct_pt_wo_pre");
@@ -520,6 +546,28 @@ void ct_pt_matrix_mul_w_preprocess_test()
 
     if (::moai::sim::SimTiming::enabled())
     {
+        const char *report_ev = std::getenv("MOAI_SIM_REPORT_PATH");
+        const std::string report_file =
+            (report_ev != nullptr && report_ev[0] != '\0') ? std::string(report_ev)
+                                                         : std::string(::moai::sim::default_sim_report_path());
+        ::moai::sim::ensure_parent_dirs_for_file(report_file.c_str());
+        std::ofstream report_ofs(report_file.c_str(), std::ios::out | std::ios::app);
+        const bool report_ok = report_ofs.is_open();
+        std::ostream &report_os = report_ok ? report_ofs : std::cout;
+        const char *quiet_ev = std::getenv("MOAI_SIM_REPORT_QUIET");
+        const bool quiet =
+            quiet_ev != nullptr && quiet_ev[0] != '\0' && std::strcmp(quiet_ev, "0") != 0;
+
+#if !defined(_WIN32)
+        {
+          char cwd_buf[4096];
+          if (getcwd(cwd_buf, sizeof(cwd_buf)) != nullptr)
+            cout << "[MOAI_SIM_BACKEND] cwd=" << cwd_buf << endl;
+        }
+#endif
+        cout << "[MOAI_SIM_BACKEND] sim_report path=" << report_file
+             << " opened=" << (report_ok ? "yes" : "NO") << endl;
+
         // Estimator-only path: avoid allocating GPU ciphertext/plaintext buffers.
         const uint64_t poly_modulus_degree = 65536;
         const uint64_t coeff_modulus_size = 4; // {60,40,40,60} in this test
@@ -550,7 +598,18 @@ void ct_pt_matrix_mul_w_preprocess_test()
                 }
             }
             cout << "[MOAI_SIM_BACKEND] stage=ct_pt_pre_encode_w" << endl;
-            ::moai::sim::SimTiming::instance().print_summary(std::cout);
+            report_os << "\n=== MOAI_SIM_REPORT ct_pt_pre_encode_w ts=" << static_cast<long long>(std::time(nullptr))
+                      << " ===\n";
+            ::moai::sim::SimTiming::instance().print_summary(report_os);
+            if (report_ok) report_ofs.flush();
+            if (!quiet)
+            {
+                if (report_ok)
+                    cout << "[MOAI_SIM_BACKEND] report appended to " << report_file << endl;
+                else
+                    cerr << "[MOAI_SIM_BACKEND] warning: could not open report file " << report_file << endl;
+                ::moai::sim::SimTiming::instance().print_summary(std::cout);
+            }
         }
         else
         {
@@ -570,7 +629,7 @@ void ct_pt_matrix_mul_w_preprocess_test()
                 if (::moai::sim::EngineModel::enabled())
                 {
                     const uint64_t coeffs = ct_size * poly_modulus_degree * coeff_modulus_size;
-                    ::moai::sim::EngineModel::instance().enqueue_dma(coeffs * sizeof(uint64_t));
+                    ::moai::sim::EngineModel::instance().enqueue_dma_d2d(coeffs * sizeof(uint64_t));
                 }
             }
         }
@@ -593,9 +652,22 @@ void ct_pt_matrix_mul_w_preprocess_test()
                 ::moai::sim::EngineModel::instance().enqueue_rescale(ct_size, poly_modulus_degree, coeff_modulus_size);
         }
         cout << "[MOAI_SIM_BACKEND] stage=ct_pt_matrix_mul_pre_encoded" << endl;
-        ::moai::sim::SimTiming::instance().print_summary(std::cout);
+        report_os << "\n=== MOAI_SIM_REPORT ct_pt_matrix_mul_pre_encoded ts=" << static_cast<long long>(std::time(nullptr))
+                  << " ===\n";
+        ::moai::sim::SimTiming::instance().print_summary(report_os);
         if (::moai::sim::EngineModel::enabled())
-            ::moai::sim::EngineModel::instance().print_summary(std::cout, "ct_pt_pre_encoded");
+            ::moai::sim::EngineModel::instance().print_summary(report_os, "ct_pt_pre_encoded");
+        if (report_ok) report_ofs.flush();
+        if (!quiet)
+        {
+            if (report_ok)
+                cout << "[MOAI_SIM_BACKEND] report appended to " << report_file << endl;
+            else
+                cerr << "[MOAI_SIM_BACKEND] warning: could not open report file " << report_file << endl;
+            ::moai::sim::SimTiming::instance().print_summary(std::cout);
+            if (::moai::sim::EngineModel::enabled())
+                ::moai::sim::EngineModel::instance().print_summary(std::cout, "ct_pt_pre_encoded");
+        }
         cout << "[MOAI_SIM_BACKEND] (ct_pt pre) finished; skipping GPU run." << endl;
         return;
     }

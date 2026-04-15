@@ -1,5 +1,7 @@
 #include "include.cuh"
 
+#include "source/sim/engine_config.h"
+
 #if defined(MOAI_HAVE_NVTX)
 #include <nvtx3/nvToolsExt.h>
 #endif
@@ -11,6 +13,109 @@ using namespace moai;
 void ct_ct_matrix_mul_test()
 {
     cout << "Task: test column packing Ct-Ct matrix multiplication in CKKS scheme: " << endl;
+
+    if (::moai::sim::SimTiming::enabled())
+    {
+        // Estimator-only: first col-packing kernel in ct_ct_matrix_mul_colpacking (dims match GPU test below).
+        const uint64_t N = 65536;
+        const uint64_t T = 15;  // |coeff_modulus| in parms.set_coeff_modulus(...) below
+        const int col_X = 64;
+        const int row_X = 128;
+        const uint64_t bytes_ct_one = 2ULL * N * T * sizeof(uint64_t);
+
+        const char *report_ev = std::getenv("MOAI_SIM_REPORT_PATH");
+        const std::string report_file =
+            (report_ev != nullptr && report_ev[0] != '\0') ? std::string(report_ev)
+                                                           : std::string(::moai::sim::default_sim_report_path());
+        ::moai::sim::ensure_parent_dirs_for_file(report_file.c_str());
+        std::ofstream report_ofs(report_file.c_str(), std::ios::out | std::ios::app);
+        const bool report_ok = report_ofs.is_open();
+        std::ostream &report_os = report_ok ? report_ofs : std::cout;
+
+        const char *quiet_ev = std::getenv("MOAI_SIM_REPORT_QUIET");
+        const bool quiet =
+            quiet_ev != nullptr && quiet_ev[0] != '\0' && std::strcmp(quiet_ev, "0") != 0;
+
+#if !defined(_WIN32)
+        {
+          char cwd_buf[4096];
+          if (getcwd(cwd_buf, sizeof(cwd_buf)) != nullptr)
+            cout << "[MOAI_SIM_BACKEND] cwd=" << cwd_buf << endl;
+        }
+#endif
+        cout << "[MOAI_SIM_BACKEND] sim_report path=" << report_file
+             << " opened=" << (report_ok ? "yes" : "NO") << endl;
+
+        ::moai::sim::SimTiming::instance().reset();
+        if (::moai::sim::EngineModel::enabled())
+          ::moai::sim::EngineModel::instance().reset();
+
+        uint64_t dep = 0;
+        for (int i = 0; i < row_X; ++i)
+        {
+          for (int j = 0; j < col_X; ++j)
+          {
+            ::moai::sim::SimTiming::instance().record_deep_copy_cipher(2, N, T);
+            if (::moai::sim::EngineModel::enabled())
+              dep = ::moai::sim::EngineModel::instance().enqueue_dma_d2d(bytes_ct_one, dep);
+            if (i > 0)
+            {
+              if (::moai::sim::EngineModel::enabled())
+                dep = ::moai::sim::EngineModel::instance().enqueue_rotate(2, N, T, dep);
+            }
+          }
+
+          ::moai::sim::SimTiming::instance().record_deep_copy_cipher(2, N, T);
+          if (::moai::sim::EngineModel::enabled())
+            dep = ::moai::sim::EngineModel::instance().enqueue_dma_d2d(bytes_ct_one, dep);
+
+          ::moai::sim::SimTiming::instance().record_ct_ct_multiply(N, T);
+          if (::moai::sim::EngineModel::enabled())
+            dep = ::moai::sim::EngineModel::instance().enqueue_ct_ct_multiply(2, N, T, dep);
+
+          for (int j = 1; j < col_X; ++j)
+          {
+            ::moai::sim::SimTiming::instance().record_deep_copy_cipher(2, N, T);
+            if (::moai::sim::EngineModel::enabled())
+              dep = ::moai::sim::EngineModel::instance().enqueue_dma_d2d(bytes_ct_one, dep);
+            ::moai::sim::SimTiming::instance().record_ct_ct_multiply(N, T);
+            if (::moai::sim::EngineModel::enabled())
+              dep = ::moai::sim::EngineModel::instance().enqueue_ct_ct_multiply(2, N, T, dep);
+            ::moai::sim::SimTiming::instance().record_add_inplace(N, T);
+            if (::moai::sim::EngineModel::enabled())
+              dep = ::moai::sim::EngineModel::instance().enqueue_add_inplace(2, N, T, dep);
+          }
+
+          if (::moai::sim::EngineModel::enabled())
+            dep = ::moai::sim::EngineModel::instance().enqueue_relinearize(2, N, T, dep);
+          ::moai::sim::SimTiming::instance().record_rescale(N, T);
+          if (::moai::sim::EngineModel::enabled())
+            dep = ::moai::sim::EngineModel::instance().enqueue_rescale(2, N, T, dep);
+        }
+
+        const std::time_t now = std::time(nullptr);
+        report_os << "\n=== MOAI_SIM_REPORT ct_ct_colpacking_est ts=" << static_cast<long long>(now)
+                  << " col_X=" << col_X << " row_X=" << row_X << " ===\n";
+        ::moai::sim::SimTiming::instance().print_summary(report_os);
+        if (::moai::sim::EngineModel::enabled())
+          ::moai::sim::EngineModel::instance().print_summary(report_os, "ct_ct_colpacking_est");
+
+        if (report_ok) report_ofs.flush();
+
+        if (!quiet)
+        {
+          if (report_ok)
+            cout << "[MOAI_SIM_BACKEND] report appended to " << report_file << endl;
+          else
+            cerr << "[MOAI_SIM_BACKEND] warning: could not open report file " << report_file << endl;
+          ::moai::sim::SimTiming::instance().print_summary(std::cout);
+          if (::moai::sim::EngineModel::enabled())
+            ::moai::sim::EngineModel::instance().print_summary(std::cout, "ct_ct_colpacking_est");
+        }
+
+        cout << "[MOAI_SIM_BACKEND] (ct_ct estimator) finished; skipping GPU run." << endl;
+        return;
+    }
 
     EncryptionParameters parms(scheme_type::ckks);
 
