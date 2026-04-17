@@ -2,6 +2,7 @@
 #include "fft.h"
 
 #include <cmath>
+#include <limits>
 
 // for compute_shoup
 #include "util/uintarithsmallmod.h"
@@ -280,6 +281,9 @@ void PhantomCKKSEncoder::encode_internal_uniform_real(const PhantomContext &cont
     if (scale <= 0 || (static_cast<int>(log2(scale)) + 1 >= context_data.total_coeff_modulus_bit_count())) {
         throw std::invalid_argument("scale out of bounds");
     }
+    if (!std::isfinite(value) || !std::isfinite(scale)) {
+        throw std::invalid_argument("value/scale must be finite");
+    }
     if (slots_ < 2) {
         throw std::invalid_argument("uniform real encoding unavailable for slots < 2");
     }
@@ -291,7 +295,11 @@ void PhantomCKKSEncoder::encode_internal_uniform_real(const PhantomContext &cont
     // where the real part is `value * scale` (equivalently `(value * scale/slots) * slots` from the
     // prior basis+IFFT formulation). No `special_fft_backward` or cached basis is required.
     PHANTOM_CHECK_CUDA(cudaMemsetAsync(gpu_ckks_msg_vec_->in(), 0, slots_ * sizeof(cuDoubleComplex), stream));
-    const double dc_re = value * scale;
+    const long double dc_re_ld = static_cast<long double>(value) * static_cast<long double>(scale);
+    if (!std::isfinite(static_cast<double>(dc_re_ld))) {
+        throw std::invalid_argument("encoded values are too large");
+    }
+    const double dc_re = static_cast<double>(dc_re_ld);
     const cuDoubleComplex dc = make_cuDoubleComplex(dc_re, 0.0);
     PHANTOM_CHECK_CUDA(cudaMemcpyAsync(gpu_ckks_msg_vec_->in(), &dc, sizeof(cuDoubleComplex), cudaMemcpyHostToDevice,
                                        stream));
@@ -307,7 +315,16 @@ void PhantomCKKSEncoder::encode_internal_uniform_real(const PhantomContext &cont
     // For uniform-real scalar encoding in this implementation, the coeff-domain polynomial after decompose
     // has only coefficient 0 potentially non-zero for each modulus limb. In NTT/evaluation form this is
     // a broadcast across all coefficients with value (round(value*scale) mod qj).
-    const long long coeff_ll = llround(dc_re);
+    const long double abs_dc_re_ld = std::fabs(dc_re_ld);
+    const long double max_ll = static_cast<long double>(std::numeric_limits<long long>::max());
+    // Ensure llroundl fits in signed 64-bit (also prevents INT64_MIN edge causing abs() overflow in device code).
+    if (!std::isfinite(dc_re_ld) || abs_dc_re_ld > (max_ll - 0.5L)) {
+        throw std::invalid_argument("uniform real encode overflow in scalar_coeff");
+    }
+    const long long coeff_ll = static_cast<long long>(llroundl(dc_re_ld));
+    if (coeff_ll == std::numeric_limits<long long>::min()) {
+        throw std::invalid_argument("uniform real encode overflow in scalar_coeff");
+    }
     destination.rep_ = PhantomPlaintext::ckks_plain_rep::broadcast_ntt;
     destination.broadcast_scalar_coeff_ = static_cast<int64_t>(coeff_ll);
 

@@ -49,7 +49,7 @@ static void moai_redirect_test_stdout() {
 // #include "test_gelu.cuh"
 // #include "test_layernorm.cuh"
 // #include "test_softmax.cuh"
-// #include "test_single_layer.cuh"
+// single layer test is included by include.cuh
 #include <cuda_runtime.h>
 using namespace std;
 using namespace phantom;
@@ -108,6 +108,10 @@ int main()
         }
         if (std::strcmp(bench, "ct_pt_pre") == 0) {
             ct_pt_matrix_mul_w_preprocess_test();
+            return 0;
+        }
+        if (std::strcmp(bench, "ct_pt_proj_compare") == 0) {
+            ct_pt_proj_matmul_bench_single_layer_compare();
             return 0;
         }
         if (std::strcmp(bench, "ct_ct") == 0) {
@@ -171,10 +175,14 @@ int main()
             moai_sim_primitive_micro_bench("all");
             return 0;
         }
+        if (std::strcmp(bench, "single_layer") == 0) {
+            single_layer_test();
+            return 0;
+        }
         std::cerr << "MOAI_BENCH_MODE='" << bench
                   << "' — use boot | bootstrap_micro | ct_pt | ct_pt_sanity | ct_pt_pre | ct_ct | softmax_micro | softmax | "
                      "softmax_boot | gelu | "
-                     "layernorm | sim_primitive | sim_primitives | sim_mul_plain | sim_mul_ct | sim_add_inplace | "
+                     "layernorm | single_layer | ct_pt_proj_compare | sim_primitive | sim_primitives | sim_mul_plain | sim_mul_ct | sim_add_inplace | "
                      "sim_rescale | sim_rotate | sim_relin | sim_modswitch | "
                      "(unset for single_layer)\n";
         return 2;

@@ -21,7 +21,8 @@ __global__ void add_broadcast_scalar_rns_poly_inplace(uint64_t *ct0,
         const size_t twr = tid / poly_degree;
         const uint64_t q = modulus[twr].value();
         const int64_t c = scalar_coeff;
-        const uint64_t abs_c = static_cast<uint64_t>(c < 0 ? -static_cast<int64_t>(c) : c);
+        const uint64_t abs_c =
+                (c >= 0) ? static_cast<uint64_t>(c) : (static_cast<uint64_t>(-(c + 1)) + 1ULL);
         uint64_t addv = static_cast<uint64_t>(abs_c % q);
         if (c < 0 && addv) {
             addv = q - addv;
@@ -43,7 +44,8 @@ __global__ void sub_broadcast_scalar_rns_poly_inplace(uint64_t *ct0,
         const size_t twr = tid / poly_degree;
         const uint64_t q = modulus[twr].value();
         const int64_t c = scalar_coeff;
-        const uint64_t abs_c = static_cast<uint64_t>(c < 0 ? -static_cast<int64_t>(c) : c);
+        const uint64_t abs_c =
+                (c >= 0) ? static_cast<uint64_t>(c) : (static_cast<uint64_t>(-(c + 1)) + 1ULL);
         uint64_t subv = static_cast<uint64_t>(abs_c % q);
         if (c < 0 && subv) {
             subv = q - subv;
@@ -66,7 +68,8 @@ __global__ void multiply_broadcast_scalar_coeff_rns_poly_inplace(const uint64_t 
         DModulus mod = modulus[twr];
         const uint64_t q = mod.value();
         const int64_t c = scalar_coeff;
-        const uint64_t abs_c = static_cast<uint64_t>(c < 0 ? -static_cast<int64_t>(c) : c);
+        const uint64_t abs_c =
+                (c >= 0) ? static_cast<uint64_t>(c) : (static_cast<uint64_t>(-(c + 1)) + 1ULL);
         uint64_t r = static_cast<uint64_t>(abs_c % q);
         if (c < 0 && r) {
             r = q - r;

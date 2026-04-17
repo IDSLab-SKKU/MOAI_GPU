@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
+#include <limits>
 #include <fstream>
 #include <ctime>
 #include <string>
@@ -55,49 +56,148 @@ void ct_pt_matrix_mul_sanity_small_test()
     PhantomCiphertext ct_x;
     encryptor.encrypt(pt_x, ct_x);
 
-    const double w = -0.125;
-
-    PhantomPlaintext pt_w_vec;
-    vector<double> wvec(slot_count, w);
-    encoder.encode(wvec, ct_x.params_id(), ct_x.scale(), pt_w_vec);
-
-    PhantomPlaintext pt_w_uni;
-    encoder.encode(w, ct_x.params_id(), ct_x.scale(), pt_w_uni);
-
     Evaluator evaluator(&context, &phantom_encoder);
-    PhantomCiphertext ct_y_vec, ct_y_uni;
-    evaluator.multiply_plain(ct_x, pt_w_vec, ct_y_vec);
-    evaluator.multiply_plain(ct_x, pt_w_uni, ct_y_uni);
+    const double tol = 1e-3;
+    bool ok = true;
 
-    PhantomPlaintext p_y_vec, p_y_uni;
-    decryptor.decrypt(ct_y_vec, p_y_vec);
-    decryptor.decrypt(ct_y_uni, p_y_uni);
+    const vector<double> ws = {-0.125, 0.0, 0.25, -1.5};
+    for (double w : ws) {
+        PhantomPlaintext pt_w_vec;
+        vector<double> wvec(slot_count, w);
+        encoder.encode(wvec, ct_x.params_id(), ct_x.scale(), pt_w_vec);
 
-    vector<double> y_vec, y_uni;
-    encoder.decode(p_y_vec, y_vec);
-    encoder.decode(p_y_uni, y_uni);
+        PhantomPlaintext pt_w_uni;
+        encoder.encode(w, ct_x.params_id(), ct_x.scale(), pt_w_uni);
 
-    double max_err_vec = 0.0;
-    double max_err_uni = 0.0;
-    double max_diff = 0.0;
-    for (size_t s = 0; s < std::min<size_t>(slot_count, 32); ++s)
-    {
-        const double expected = x[s] * w;
-        max_err_vec = std::max(max_err_vec, std::fabs(y_vec[s] - expected));
-        max_err_uni = std::max(max_err_uni, std::fabs(y_uni[s] - expected));
-        max_diff = std::max(max_diff, std::fabs(y_uni[s] - y_vec[s]));
+        // multiply_plain
+        PhantomCiphertext ct_mul_vec, ct_mul_uni;
+        evaluator.multiply_plain(ct_x, pt_w_vec, ct_mul_vec);
+        evaluator.multiply_plain(ct_x, pt_w_uni, ct_mul_uni);
+
+        PhantomPlaintext p_mul_vec, p_mul_uni;
+        decryptor.decrypt(ct_mul_vec, p_mul_vec);
+        decryptor.decrypt(ct_mul_uni, p_mul_uni);
+
+        vector<double> y_mul_vec, y_mul_uni;
+        encoder.decode(p_mul_vec, y_mul_vec);
+        encoder.decode(p_mul_uni, y_mul_uni);
+
+        // add_plain_inplace (acts on c0 only)
+        PhantomCiphertext ct_add_vec = ct_x;
+        PhantomCiphertext ct_add_uni = ct_x;
+        evaluator.add_plain_inplace(ct_add_vec, pt_w_vec);
+        evaluator.add_plain_inplace(ct_add_uni, pt_w_uni);
+
+        PhantomPlaintext p_add_vec, p_add_uni;
+        decryptor.decrypt(ct_add_vec, p_add_vec);
+        decryptor.decrypt(ct_add_uni, p_add_uni);
+
+        vector<double> y_add_vec, y_add_uni;
+        encoder.decode(p_add_vec, y_add_vec);
+        encoder.decode(p_add_uni, y_add_uni);
+
+        // sub_plain_inplace (acts on c0 only)
+        PhantomCiphertext ct_sub_vec = ct_x;
+        PhantomCiphertext ct_sub_uni = ct_x;
+        evaluator.sub_plain_inplace(ct_sub_vec, pt_w_vec);
+        evaluator.sub_plain_inplace(ct_sub_uni, pt_w_uni);
+
+        PhantomPlaintext p_sub_vec, p_sub_uni;
+        decryptor.decrypt(ct_sub_vec, p_sub_vec);
+        decryptor.decrypt(ct_sub_uni, p_sub_uni);
+
+        vector<double> y_sub_vec, y_sub_uni;
+        encoder.decode(p_sub_vec, y_sub_vec);
+        encoder.decode(p_sub_uni, y_sub_uni);
+
+        double max_diff_mul = 0.0, max_diff_add = 0.0, max_diff_sub = 0.0;
+        double max_err_mul = 0.0, max_err_add = 0.0, max_err_sub = 0.0;
+        for (size_t s = 0; s < std::min<size_t>(slot_count, 32); ++s) {
+            const double exp_mul = x[s] * w;
+            const double exp_add = x[s] + w;
+            const double exp_sub = x[s] - w;
+            max_err_mul = std::max(max_err_mul, std::fabs(y_mul_uni[s] - exp_mul));
+            max_err_add = std::max(max_err_add, std::fabs(y_add_uni[s] - exp_add));
+            max_err_sub = std::max(max_err_sub, std::fabs(y_sub_uni[s] - exp_sub));
+            max_diff_mul = std::max(max_diff_mul, std::fabs(y_mul_uni[s] - y_mul_vec[s]));
+            max_diff_add = std::max(max_diff_add, std::fabs(y_add_uni[s] - y_add_vec[s]));
+            max_diff_sub = std::max(max_diff_sub, std::fabs(y_sub_uni[s] - y_sub_vec[s]));
+        }
+
+        cout << "[SANITY_SMALL] w=" << w << " tol=" << tol
+             << " | mul(diff=" << max_diff_mul << ", err=" << max_err_mul << ")"
+             << " add(diff=" << max_diff_add << ", err=" << max_err_add << ")"
+             << " sub(diff=" << max_diff_sub << ", err=" << max_err_sub << ")" << endl;
+
+        if (max_err_mul > tol || max_err_add > tol || max_err_sub > tol ||
+            max_diff_mul > tol || max_diff_add > tol || max_diff_sub > tol) {
+            ok = false;
+        }
     }
 
-    const double tol = 1e-3;
-    cout << "[SANITY_SMALL] w=" << w << " tol=" << tol << endl;
-    cout << "[SANITY_SMALL] max_abs_err_vs_expected (legacy vec) = " << max_err_vec << endl;
-    cout << "[SANITY_SMALL] max_abs_err_vs_expected (fast uni)   = " << max_err_uni << endl;
-    cout << "[SANITY_SMALL] max_abs_diff(fast,legacy)           = " << max_diff << endl;
+    // Overflow/robustness: make sure scalar encode rejects values that cannot fit in int64 rounding.
+    bool overflow_thrown = false;
+    try {
+        const long double max_ll = static_cast<long double>(std::numeric_limits<long long>::max());
+        const long double s = static_cast<long double>(ct_x.scale());
+        // Choose value so that value*scale exceeds max_ll.
+        const double huge_w = static_cast<double>((max_ll / s) * 2.0L);
+        PhantomPlaintext pt_over;
+        encoder.encode(huge_w, ct_x.params_id(), ct_x.scale(), pt_over);
+    } catch (const std::invalid_argument &) {
+        overflow_thrown = true;
+    }
+    cout << "[SANITY_SMALL] overflow_reject=" << (overflow_thrown ? "PASS" : "FAIL") << endl;
 
-    if (max_err_vec <= tol && max_err_uni <= tol && max_diff <= tol)
-        cout << "[SANITY_SMALL] PASS" << endl;
-    else
-        cout << "[SANITY_SMALL] FAIL" << endl;
+    // Reject NaN/Inf explicitly
+    bool nan_thrown = false;
+    bool inf_thrown = false;
+    try {
+        PhantomPlaintext pt_nan;
+        encoder.encode(std::numeric_limits<double>::quiet_NaN(), ct_x.params_id(), ct_x.scale(), pt_nan);
+    } catch (const std::invalid_argument &) {
+        nan_thrown = true;
+    }
+    try {
+        PhantomPlaintext pt_inf;
+        encoder.encode(std::numeric_limits<double>::infinity(), ct_x.params_id(), ct_x.scale(), pt_inf);
+    } catch (const std::invalid_argument &) {
+        inf_thrown = true;
+    }
+    cout << "[SANITY_SMALL] nan_reject=" << (nan_thrown ? "PASS" : "FAIL")
+         << " inf_reject=" << (inf_thrown ? "PASS" : "FAIL") << endl;
+
+    // Mismatch checks: scale mismatch and parms_id mismatch must throw
+    bool scale_mismatch_thrown = false;
+    try {
+        PhantomPlaintext pt_bad_scale;
+        encoder.encode(0.25, ct_x.params_id(), ct_x.scale() * 2.0, pt_bad_scale);
+        PhantomCiphertext ct_tmp = ct_x;
+        evaluator.add_plain_inplace(ct_tmp, pt_bad_scale);
+    } catch (const std::invalid_argument &) {
+        scale_mismatch_thrown = true;
+    }
+    bool chain_mismatch_thrown = false;
+    try {
+        size_t bad_chain = 0;
+        if (context.context_data_.size() > 1) {
+            bad_chain = (ct_x.chain_index() == 0) ? 1 : 0;
+        }
+        PhantomPlaintext pt_bad_chain;
+        encoder.encode(0.25, bad_chain, ct_x.scale(), pt_bad_chain);
+        PhantomCiphertext ct_tmp = ct_x;
+        evaluator.add_plain_inplace(ct_tmp, pt_bad_chain);
+    } catch (const std::invalid_argument &) {
+        chain_mismatch_thrown = true;
+    }
+    cout << "[SANITY_SMALL] scale_mismatch_throw=" << (scale_mismatch_thrown ? "PASS" : "FAIL")
+         << " chain_mismatch_throw=" << (chain_mismatch_thrown ? "PASS" : "FAIL") << endl;
+
+    cout << "[SANITY_SMALL] "
+         << (ok && overflow_thrown && nan_thrown && inf_thrown && scale_mismatch_thrown && chain_mismatch_thrown
+                     ? "PASS"
+                     : "FAIL")
+         << endl;
 }
 
 void ct_pt_matrix_mul_sanity_test()
@@ -135,52 +235,145 @@ void ct_pt_matrix_mul_sanity_test()
     PhantomCiphertext ct_x;
     encryptor.encrypt(pt_x, ct_x);
 
-    // Multiply by a broadcast scalar w via plaintext encode.
-    const double w = -0.125;
-
-    // legacy plaintext: explicit slot vector
-    PhantomPlaintext pt_w_vec;
-    vector<double> wvec(slot_count, w);
-    encoder.encode(wvec, ct_x.params_id(), ct_x.scale(), pt_w_vec);
-
-    // fast plaintext: scalar encode (uniform path)
-    PhantomPlaintext pt_w_uni;
-    encoder.encode(w, ct_x.params_id(), ct_x.scale(), pt_w_uni);
-
     Evaluator evaluator(&context, &phantom_encoder);
-    PhantomCiphertext ct_y_vec, ct_y_uni;
-    evaluator.multiply_plain(ct_x, pt_w_vec, ct_y_vec);
-    evaluator.multiply_plain(ct_x, pt_w_uni, ct_y_uni);
+    const double tol = 1e-3;
+    bool ok = true;
 
-    PhantomPlaintext p_y_vec, p_y_uni;
-    decryptor.decrypt(ct_y_vec, p_y_vec);
-    decryptor.decrypt(ct_y_uni, p_y_uni);
+    const vector<double> ws = {-0.125, 0.0, 0.25, -1.5};
+    for (double w : ws) {
+        // legacy plaintext: explicit slot vector
+        PhantomPlaintext pt_w_vec;
+        vector<double> wvec(slot_count, w);
+        encoder.encode(wvec, ct_x.params_id(), ct_x.scale(), pt_w_vec);
 
-    vector<double> y_vec, y_uni;
-    encoder.decode(p_y_vec, y_vec);
-    encoder.decode(p_y_uni, y_uni);
+        // fast plaintext: scalar encode (uniform path)
+        PhantomPlaintext pt_w_uni;
+        encoder.encode(w, ct_x.params_id(), ct_x.scale(), pt_w_uni);
 
-    double max_err_vec = 0.0;
-    double max_err_uni = 0.0;
-    double max_diff = 0.0;
-    for (size_t s = 0; s < std::min<size_t>(slot_count, 32); ++s)
-    {
-        const double expected = x[s] * w;
-        max_err_vec = std::max(max_err_vec, std::fabs(y_vec[s] - expected));
-        max_err_uni = std::max(max_err_uni, std::fabs(y_uni[s] - expected));
-        max_diff = std::max(max_diff, std::fabs(y_uni[s] - y_vec[s]));
+        // multiply_plain
+        PhantomCiphertext ct_mul_vec, ct_mul_uni;
+        evaluator.multiply_plain(ct_x, pt_w_vec, ct_mul_vec);
+        evaluator.multiply_plain(ct_x, pt_w_uni, ct_mul_uni);
+
+        PhantomPlaintext p_mul_vec, p_mul_uni;
+        decryptor.decrypt(ct_mul_vec, p_mul_vec);
+        decryptor.decrypt(ct_mul_uni, p_mul_uni);
+
+        vector<double> y_mul_vec, y_mul_uni;
+        encoder.decode(p_mul_vec, y_mul_vec);
+        encoder.decode(p_mul_uni, y_mul_uni);
+
+        // add_plain_inplace
+        PhantomCiphertext ct_add_vec = ct_x;
+        PhantomCiphertext ct_add_uni = ct_x;
+        evaluator.add_plain_inplace(ct_add_vec, pt_w_vec);
+        evaluator.add_plain_inplace(ct_add_uni, pt_w_uni);
+
+        PhantomPlaintext p_add_vec, p_add_uni;
+        decryptor.decrypt(ct_add_vec, p_add_vec);
+        decryptor.decrypt(ct_add_uni, p_add_uni);
+
+        vector<double> y_add_vec, y_add_uni;
+        encoder.decode(p_add_vec, y_add_vec);
+        encoder.decode(p_add_uni, y_add_uni);
+
+        // sub_plain_inplace
+        PhantomCiphertext ct_sub_vec = ct_x;
+        PhantomCiphertext ct_sub_uni = ct_x;
+        evaluator.sub_plain_inplace(ct_sub_vec, pt_w_vec);
+        evaluator.sub_plain_inplace(ct_sub_uni, pt_w_uni);
+
+        PhantomPlaintext p_sub_vec, p_sub_uni;
+        decryptor.decrypt(ct_sub_vec, p_sub_vec);
+        decryptor.decrypt(ct_sub_uni, p_sub_uni);
+
+        vector<double> y_sub_vec, y_sub_uni;
+        encoder.decode(p_sub_vec, y_sub_vec);
+        encoder.decode(p_sub_uni, y_sub_uni);
+
+        double max_diff_mul = 0.0, max_diff_add = 0.0, max_diff_sub = 0.0;
+        double max_err_mul = 0.0, max_err_add = 0.0, max_err_sub = 0.0;
+        for (size_t s = 0; s < std::min<size_t>(slot_count, 32); ++s) {
+            const double exp_mul = x[s] * w;
+            const double exp_add = x[s] + w;
+            const double exp_sub = x[s] - w;
+            max_err_mul = std::max(max_err_mul, std::fabs(y_mul_uni[s] - exp_mul));
+            max_err_add = std::max(max_err_add, std::fabs(y_add_uni[s] - exp_add));
+            max_err_sub = std::max(max_err_sub, std::fabs(y_sub_uni[s] - exp_sub));
+            max_diff_mul = std::max(max_diff_mul, std::fabs(y_mul_uni[s] - y_mul_vec[s]));
+            max_diff_add = std::max(max_diff_add, std::fabs(y_add_uni[s] - y_add_vec[s]));
+            max_diff_sub = std::max(max_diff_sub, std::fabs(y_sub_uni[s] - y_sub_vec[s]));
+        }
+
+        cout << "[SANITY] w=" << w << " tol=" << tol
+             << " | mul(diff=" << max_diff_mul << ", err=" << max_err_mul << ")"
+             << " add(diff=" << max_diff_add << ", err=" << max_err_add << ")"
+             << " sub(diff=" << max_diff_sub << ", err=" << max_err_sub << ")" << endl;
+
+        if (max_err_mul > tol || max_err_add > tol || max_err_sub > tol ||
+            max_diff_mul > tol || max_diff_add > tol || max_diff_sub > tol) {
+            ok = false;
+        }
     }
 
-    const double tol = 1e-3;
-    cout << "[SANITY] w=" << w << " tol=" << tol << endl;
-    cout << "[SANITY] max_abs_err_vs_expected (legacy vec) = " << max_err_vec << endl;
-    cout << "[SANITY] max_abs_err_vs_expected (fast uni)   = " << max_err_uni << endl;
-    cout << "[SANITY] max_abs_diff(fast,legacy)           = " << max_diff << endl;
+    bool overflow_thrown = false;
+    try {
+        const long double max_ll = static_cast<long double>(std::numeric_limits<long long>::max());
+        const long double s = static_cast<long double>(ct_x.scale());
+        const double huge_w = static_cast<double>((max_ll / s) * 2.0L);
+        PhantomPlaintext pt_over;
+        encoder.encode(huge_w, ct_x.params_id(), ct_x.scale(), pt_over);
+    } catch (const std::invalid_argument &) {
+        overflow_thrown = true;
+    }
+    cout << "[SANITY] overflow_reject=" << (overflow_thrown ? "PASS" : "FAIL") << endl;
 
-    if (max_err_vec <= tol && max_err_uni <= tol && max_diff <= tol)
-        cout << "[SANITY] PASS" << endl;
-    else
-        cout << "[SANITY] FAIL" << endl;
+    bool nan_thrown = false;
+    bool inf_thrown = false;
+    try {
+        PhantomPlaintext pt_nan;
+        encoder.encode(std::numeric_limits<double>::quiet_NaN(), ct_x.params_id(), ct_x.scale(), pt_nan);
+    } catch (const std::invalid_argument &) {
+        nan_thrown = true;
+    }
+    try {
+        PhantomPlaintext pt_inf;
+        encoder.encode(std::numeric_limits<double>::infinity(), ct_x.params_id(), ct_x.scale(), pt_inf);
+    } catch (const std::invalid_argument &) {
+        inf_thrown = true;
+    }
+    cout << "[SANITY] nan_reject=" << (nan_thrown ? "PASS" : "FAIL")
+         << " inf_reject=" << (inf_thrown ? "PASS" : "FAIL") << endl;
+
+    bool scale_mismatch_thrown = false;
+    try {
+        PhantomPlaintext pt_bad_scale;
+        encoder.encode(0.25, ct_x.params_id(), ct_x.scale() * 2.0, pt_bad_scale);
+        PhantomCiphertext ct_tmp = ct_x;
+        evaluator.add_plain_inplace(ct_tmp, pt_bad_scale);
+    } catch (const std::invalid_argument &) {
+        scale_mismatch_thrown = true;
+    }
+    bool chain_mismatch_thrown = false;
+    try {
+        size_t bad_chain = 0;
+        if (context.context_data_.size() > 1) {
+            bad_chain = (ct_x.chain_index() == 0) ? 1 : 0;
+        }
+        PhantomPlaintext pt_bad_chain;
+        encoder.encode(0.25, bad_chain, ct_x.scale(), pt_bad_chain);
+        PhantomCiphertext ct_tmp = ct_x;
+        evaluator.add_plain_inplace(ct_tmp, pt_bad_chain);
+    } catch (const std::invalid_argument &) {
+        chain_mismatch_thrown = true;
+    }
+    cout << "[SANITY] scale_mismatch_throw=" << (scale_mismatch_thrown ? "PASS" : "FAIL")
+         << " chain_mismatch_throw=" << (chain_mismatch_thrown ? "PASS" : "FAIL") << endl;
+
+    cout << "[SANITY] "
+         << (ok && overflow_thrown && nan_thrown && inf_thrown && scale_mismatch_thrown && chain_mismatch_thrown ? "PASS"
+                                                                                                               : "FAIL")
+         << endl;
 }
 
 void ct_pt_matrix_mul_test()
@@ -629,6 +822,459 @@ void ct_pt_matrix_mul_test()
             cout << result[ind] << " ";
         }
         cout << endl;
+    }
+}
+
+static double ct_pt_matmul_end2end_seconds(
+    const char *tag,
+    vector<PhantomCiphertext> &enc_X,
+    const vector<vector<double>> &W,
+    int col_X, int col_W, int row_W,
+    PhantomContext &context)
+{
+    // Single-thread, default stream end-to-end timing including scalar encode + multiply/add + rescale.
+    PhantomCKKSEncoder phantom_encoder(context);
+    moai::Encoder encoder(&context, &phantom_encoder);
+    moai::Evaluator evaluator(&context, &phantom_encoder);
+
+    const double scale0 = enc_X[0].scale();
+    vector<PhantomCiphertext> out(static_cast<size_t>(col_W));
+
+    cudaDeviceSynchronize();
+    auto t0 = std::chrono::high_resolution_clock::now();
+
+    for (int i = 0; i < col_W; ++i)
+    {
+        PhantomCiphertext acc;
+
+        // j=0
+        {
+            PhantomPlaintext pt;
+            encoder.encode(W[0][i], enc_X[0].chain_index(), enc_X[0].scale(), pt);
+            evaluator.multiply_plain(enc_X[0], pt, acc);
+        }
+
+        for (int j = 1; j < row_W; ++j)
+        {
+            PhantomPlaintext pt;
+            encoder.encode(W[j][i], enc_X[j].chain_index(), enc_X[j].scale(), pt);
+            PhantomCiphertext tmp;
+            evaluator.multiply_plain(enc_X[j], pt, tmp);
+            evaluator.add_inplace(acc, tmp);
+        }
+
+        evaluator.rescale_to_next_inplace(acc);
+        acc.scale() = scale0;
+        out[static_cast<size_t>(i)] = std::move(acc);
+    }
+
+    cudaDeviceSynchronize();
+    auto t1 = std::chrono::high_resolution_clock::now();
+    const double sec = std::chrono::duration_cast<std::chrono::duration<double>>(t1 - t0).count();
+    cout << "[CT_PT_PROJ] " << tag << " time_s=" << sec << endl;
+    return sec;
+}
+
+static double ct_pt_matmul_end2end_seconds_stream_inputs(
+    const char *tag,
+    int row_W, int col_W,
+    const std::function<void(int /*j*/, PhantomCiphertext &/*out_ct*/)> &get_ct_j,
+    const std::function<double(int /*j*/, int /*i*/)> &get_w_ji,
+    size_t target_chain_depth,
+    double scale,
+    PhantomContext &context)
+{
+    // Memory-lean variant for very large row_W (e.g., FC2 row_W=3072):
+    // keep only output accumulators (col_W cts) + one input ct at a time.
+    PhantomCKKSEncoder phantom_encoder(context);
+    moai::Encoder encoder(&context, &phantom_encoder);
+    moai::Evaluator evaluator(&context, &phantom_encoder);
+
+    vector<PhantomCiphertext> acc(static_cast<size_t>(col_W));
+
+    cudaDeviceSynchronize();
+    auto t0 = std::chrono::high_resolution_clock::now();
+
+    // j=0 initializes acc[i] = ct0 * w0i
+    PhantomCiphertext ctj;
+    get_ct_j(0, ctj);
+    for (int i = 0; i < col_W; ++i) {
+        PhantomPlaintext pt;
+        encoder.encode(get_w_ji(0, i), ctj.chain_index(), ctj.scale(), pt);
+        evaluator.multiply_plain(ctj, pt, acc[static_cast<size_t>(i)]);
+    }
+
+    // j>=1: acc[i] += ctj * wji
+    for (int j = 1; j < row_W; ++j) {
+        get_ct_j(j, ctj);
+        for (int i = 0; i < col_W; ++i) {
+            PhantomPlaintext pt;
+            encoder.encode(get_w_ji(j, i), ctj.chain_index(), ctj.scale(), pt);
+            PhantomCiphertext tmp;
+            evaluator.multiply_plain(ctj, pt, tmp);
+            evaluator.add_inplace(acc[static_cast<size_t>(i)], tmp);
+        }
+    }
+
+    // rescale outputs (match ct_pt_matrix_mul_wo_pre behavior)
+    for (int i = 0; i < col_W; ++i) {
+        evaluator.rescale_to_next_inplace(acc[static_cast<size_t>(i)]);
+        acc[static_cast<size_t>(i)].scale() = scale;
+        (void)target_chain_depth;
+    }
+
+    cudaDeviceSynchronize();
+    auto t1 = std::chrono::high_resolution_clock::now();
+    const double sec = std::chrono::duration_cast<std::chrono::duration<double>>(t1 - t0).count();
+    cout << "[CT_PT_PROJ] " << tag << " time_s=" << sec << endl;
+    return sec;
+}
+
+void ct_pt_proj_matmul_bench_single_layer_compare()
+{
+    cout << "Task: CT×PT projection microbench (single-layer parms), legacy-vs-v2 scalar encode" << endl;
+
+    // Match single_layer_test() CKKS parms.
+    const long logn = 15;
+    const long sparse_slots = (1 << logn);
+    const int logp = 46;
+    const int logq = 51;
+    const int log_special_prime = 58;
+    const int remaining_level = moai::sim::kSingleLayerRemainingLevel; // 20
+    const int boot_level = moai::sim::kSingleLayerBootLevel;           // 14
+
+    EncryptionParameters parms(scheme_type::ckks);
+    const size_t poly_modulus_degree = static_cast<size_t>(moai::sim::kSingleLayerPolyModulusDegree());
+    parms.set_poly_modulus_degree(poly_modulus_degree);
+    parms.set_sparse_slots(sparse_slots);
+
+    std::vector<int> coeff_bit_vec;
+    coeff_bit_vec.push_back(logq);
+    for (int i = 0; i < remaining_level; ++i) coeff_bit_vec.push_back(logp);
+    for (int i = 0; i < boot_level; ++i) coeff_bit_vec.push_back(logq);
+    coeff_bit_vec.push_back(log_special_prime);
+    parms.set_coeff_modulus(CoeffModulus::Create(poly_modulus_degree, coeff_bit_vec));
+
+    const double scale = std::pow(2.0, logp);
+
+    PhantomContext context(parms);
+    print_parameters(context);
+
+    PhantomSecretKey secret_key(context);
+    PhantomPublicKey public_key = secret_key.gen_publickey(context);
+
+    // Single-layer-style batching shape: num_X x num_row packed into slots.
+    // Use num_X=256 so (num_X*num_row)=256*128=32768 fully utilizes sparse_slots (no wasted slots).
+    const int num_X = 256;
+    const int num_row = 128;
+
+    // Build encrypted packed columns without materializing a full [num_X][num_row][num_col] tensor.
+    // This matches the packing used by batch_input(): vec[num_X * row + batch] = X[batch][row][col].
+    auto encrypt_packed_columns = [&](int num_col) -> vector<PhantomCiphertext> {
+        PhantomCKKSEncoder phantom_encoder(context);
+        moai::Encoder encoder(&context, &phantom_encoder);
+        moai::Encryptor encryptor(&context, &public_key);
+        const size_t slot_count = encoder.slot_count();
+        const size_t used = static_cast<size_t>(num_X) * static_cast<size_t>(num_row);
+        vector<PhantomCiphertext> enc(static_cast<size_t>(num_col));
+
+        for (int col = 0; col < num_col; ++col) {
+            vector<double> vec(slot_count, 0.0);
+            for (int r = 0; r < num_row; ++r) {
+                for (int b = 0; b < num_X; ++b) {
+                    const size_t pos = static_cast<size_t>(num_X) * static_cast<size_t>(r) + static_cast<size_t>(b);
+                    // Deterministic non-zero pattern.
+                    vec[pos] = 0.001 * (1.0 + double((b + 1) % 7)) + 0.0001 * double((r + col) % 13);
+                }
+            }
+            // Remaining slots (if any) stay 0.
+            (void)used;
+            PhantomPlaintext pt;
+            encoder.encode(vec, scale, pt);
+            encryptor.encrypt(pt, enc[static_cast<size_t>(col)]);
+        }
+        return enc;
+    };
+
+    auto encrypt_one_packed_column = [&](int num_col, int col_idx) -> PhantomCiphertext {
+        PhantomCKKSEncoder phantom_encoder(context);
+        moai::Encoder encoder(&context, &phantom_encoder);
+        moai::Encryptor encryptor(&context, &public_key);
+        const size_t slot_count = encoder.slot_count();
+
+        vector<double> vec(slot_count, 0.0);
+        for (int r = 0; r < num_row; ++r) {
+            for (int b = 0; b < num_X; ++b) {
+                const size_t pos = static_cast<size_t>(num_X) * static_cast<size_t>(r) + static_cast<size_t>(b);
+                vec[pos] = 0.001 * (1.0 + double((b + 1) % 7)) + 0.0001 * double((r + col_idx) % 13);
+            }
+        }
+        PhantomPlaintext pt;
+        encoder.encode(vec, scale, pt);
+        PhantomCiphertext ct;
+        encryptor.encrypt(pt, ct);
+        return ct;
+    };
+
+    auto make_weights = [&](int row_W, int col_W) {
+        vector<vector<double>> W(row_W, vector<double>(col_W, 0.0));
+        // Scalar weights; value doesn't matter for complexity, but keep deterministic non-zero.
+        for (int j = 0; j < row_W; ++j)
+            for (int i = 0; i < col_W; ++i)
+                W[j][i] = 1.0 / 128.0;
+        return W;
+    };
+
+    auto modswitch_to_depth = [&](vector<PhantomCiphertext> &cts, size_t target_chain_depth) {
+        PhantomCKKSEncoder phantom_encoder(context);
+        moai::Evaluator evaluator(&context, &phantom_encoder);
+        for (auto &ct : cts) {
+            while (context.get_context_data(ct.params_id()).chain_depth() > target_chain_depth) {
+                evaluator.mod_switch_to_next_inplace(ct);
+            }
+        }
+    };
+
+    auto v_branch_depth_cap = [&](const PhantomCiphertext &k_ref) -> size_t {
+        if (const char *ev = std::getenv("MOAI_ATT_V_DEPTH_CAP")) {
+            char *end = nullptr;
+            unsigned long v = std::strtoul(ev, &end, 10);
+            if (end != ev && *end == '\0' && v <= 64) {
+                return std::max<size_t>(1, static_cast<size_t>(v));
+            }
+        }
+        const size_t kd = context.get_context_data(k_ref.params_id()).chain_depth();
+        if (kd <= 1) return 3;
+        return std::min<size_t>(3, kd - 1);
+    };
+
+    auto run_op = [&](const char *name, int row_W, int col_W) -> double {
+        cout << "[CT_PT_PROJ] begin " << name << " row_W=" << row_W << " col_W=" << col_W << endl;
+        vector<PhantomCiphertext> enc_X = encrypt_packed_columns(row_W);
+        auto W = make_weights(row_W, col_W);
+        // Warmup (small subset) to stabilize JIT/caches
+        {
+            vector<PhantomCiphertext> enc_X_small(enc_X.begin(), enc_X.begin() + std::min<int>(row_W, 8));
+            vector<vector<double>> W_small(std::min<int>(row_W, 8), vector<double>(std::min<int>(col_W, 8), 1.0 / 128.0));
+            ct_pt_matmul_end2end_seconds("warmup", enc_X_small, W_small, (int)enc_X_small.size(), (int)W_small[0].size(), (int)enc_X_small.size(), context);
+        }
+        return ct_pt_matmul_end2end_seconds(name, enc_X, W, row_W, col_W, row_W, context);
+    };
+
+    // Projections (BERT-base like):
+    // - Q/K/V per head: 768→64, repeated 12 heads => 36 CT×PT matmuls of shape (R^{128×768} × R^{768×64})
+    // - out proj: 768→768
+    // - FC1: 768→3072
+    // - FC2: 3072→768
+    const int d_model = 768;
+    const int d_ff = 3072;
+    const int num_head = 12;
+    const int d_head = 64;
+
+    // For OOM-safety, allow running exactly one op per process:
+    //   MOAI_CT_PT_PROJ_OP=qkv|out|fc1|fc2
+    // Default (unset): run all (mostly for debugging; scripts should set this).
+    std::string op = "all";
+    if (const char *ev = std::getenv("MOAI_CT_PT_PROJ_OP"); ev && ev[0] != '\0') {
+        op = ev;
+        for (char &c : op) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+
+    if (op == "qkv" || op == "all") {
+        // Match single-layer depth semantics from the paper table: 15→14 for QKV proj.
+        // In our context chain_depth appears to be (Depth-1).
+        const size_t target_depth_qkv = 14; // corresponds to Depth=15
+
+        vector<PhantomCiphertext> enc_X_qk = encrypt_packed_columns(d_model);
+        modswitch_to_depth(enc_X_qk, target_depth_qkv);
+
+        // Q/K use the same enc_X after pre-attention drops; V uses a capped-depth branch relative to K.
+        vector<vector<double>> W = make_weights(d_model, d_head);
+
+        double t_sum = 0.0;
+        for (int h = 0; h < num_head; ++h) {
+            (void)h;
+            t_sum += ct_pt_matmul_end2end_seconds("Q_proj", enc_X_qk, W, d_model, d_head, d_model, context);
+            t_sum += ct_pt_matmul_end2end_seconds("K_proj", enc_X_qk, W, d_model, d_head, d_model, context);
+
+            // V-branch pre-switch cap (same policy as single_att_block.cuh).
+            // We approximate K_ref by reusing enc_X_qk[0] depth after K path; cap is derived from its depth.
+            vector<PhantomCiphertext> enc_X_v = enc_X_qk;
+            const size_t cap = v_branch_depth_cap(enc_X_qk[0]);
+            modswitch_to_depth(enc_X_v, cap);
+            t_sum += ct_pt_matmul_end2end_seconds("V_proj", enc_X_v, W, d_model, d_head, d_model, context);
+        }
+        cout << "[CT_PT_PROJ] QKV_proj time_s=" << t_sum << endl;
+        if (op != "all") return;
+    }
+    if (op == "out" || op == "all") {
+        // Paper table: 2→1 => chain_depth target 1
+        vector<PhantomCiphertext> enc = encrypt_packed_columns(d_model);
+        modswitch_to_depth(enc, 1);
+        auto W = make_weights(d_model, d_model);
+        (void)ct_pt_matmul_end2end_seconds("out_proj", enc, W, d_model, d_model, d_model, context);
+        if (op != "all") return;
+    }
+    if (op == "fc1" || op == "all") {
+        // Paper table: 10→9 => chain_depth target 9
+        vector<PhantomCiphertext> enc = encrypt_packed_columns(d_model);
+        modswitch_to_depth(enc, 9);
+        auto W = make_weights(d_model, d_ff);
+        (void)ct_pt_matmul_end2end_seconds("fc1", enc, W, d_model, d_ff, d_model, context);
+        if (op != "all") return;
+    }
+    if (op == "fc2" || op == "all") {
+        // Paper table: 2→1 => chain_depth target 1
+        const size_t target_depth = 1;
+        // FC2 modes (to control VRAM residency of the 3072 input ciphertexts):
+        // - MOAI_CT_PT_FC2_MODE=full_vram : keep all 3072 CTs resident on GPU for compute (closest to "original" all-in-VRAM)
+        // - MOAI_CT_PT_FC2_MODE=chunk_vram: keep `chunk_size` CTs resident on GPU at once (default)
+        // - MOAI_CT_PT_FC2_MODE=stream   : keep 1 CT resident at a time
+        //
+        // Timing is split into:
+        // - precompute: encrypt+modswitch+device->host copy for all input ciphertexts
+        // - compute: host->device copy + multiply/add + final rescale
+        std::string fc2_mode = "chunk_vram";
+        if (const char *ev = std::getenv("MOAI_CT_PT_FC2_MODE"); ev && ev[0] != '\0') {
+            fc2_mode = ev;
+            for (char &c : fc2_mode) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+
+        int chunk_size = 64;
+        if (fc2_mode == "full_vram") {
+            chunk_size = d_ff;
+        } else if (fc2_mode == "stream") {
+            chunk_size = 1;
+        } else { // chunk_vram (default)
+            if (const char *ev = std::getenv("MOAI_CT_PT_FC2_CHUNK"); ev && ev[0] != '\0') {
+                char *end = nullptr;
+                long v = std::strtol(ev, &end, 10);
+                if (end != ev && *end == '\0' && v >= 1 && v <= d_ff) chunk_size = static_cast<int>(v);
+            }
+        }
+        cout << "[CT_PT_PROJ] fc2 mode=" << fc2_mode << " chunk_size=" << chunk_size << endl;
+
+        PhantomCKKSEncoder phantom_encoder(context);
+        moai::Encoder encoder(&context, &phantom_encoder);
+        moai::Evaluator evaluator(&context, &phantom_encoder);
+
+        // Allocate output accumulators on device (768 ciphertexts).
+        vector<PhantomCiphertext> acc(static_cast<size_t>(d_model));
+        bool acc_init = false;
+
+        // Precompute host cache for a chunk: store ciphertext payload + minimal metadata.
+        struct HostCt {
+            std::size_t chain_index{0};
+            std::size_t size{0};
+            std::size_t poly_degree{0};
+            std::size_t coeff_mod_size{0};
+            double scale{1.0};
+            std::uint64_t correction_factor{1};
+            bool is_ntt_form{true};
+            std::vector<uint64_t> data;
+        };
+
+        auto export_to_host = [&](const PhantomCiphertext &ct) -> HostCt {
+            HostCt h;
+            h.chain_index = ct.chain_index();
+            h.size = ct.size();
+            h.poly_degree = ct.poly_modulus_degree();
+            h.coeff_mod_size = ct.coeff_modulus_size();
+            h.scale = ct.scale();
+            h.correction_factor = ct.correction_factor();
+            h.is_ntt_form = ct.is_ntt_form();
+            const size_t words = h.size * h.poly_degree * h.coeff_mod_size;
+            h.data.resize(words);
+            PHANTOM_CHECK_CUDA(cudaMemcpy(h.data.data(), ct.data(), words * sizeof(uint64_t), cudaMemcpyDeviceToHost));
+            return h;
+        };
+
+        auto import_from_host = [&](const HostCt &h, PhantomCiphertext &ct) {
+            // Allocate device buffer for this chain_index and size.
+            ct.resize(context, h.chain_index, h.size, phantom::util::global_variables::default_stream->get_stream());
+            ct.set_scale(h.scale);
+            ct.set_correction_factor(h.correction_factor);
+            ct.set_ntt_form(h.is_ntt_form);
+            const size_t words = h.size * h.poly_degree * h.coeff_mod_size;
+            PHANTOM_CHECK_CUDA(cudaMemcpy(ct.data(), h.data.data(), words * sizeof(uint64_t), cudaMemcpyHostToDevice));
+        };
+
+        cudaDeviceSynchronize();
+        const auto t_pre0 = std::chrono::high_resolution_clock::now();
+
+        // Precompute all inputs into host in chunks so compute phase can be isolated.
+        std::vector<HostCt> host_chunk;
+        host_chunk.reserve(static_cast<size_t>(chunk_size));
+
+        // Compute phase timing: excludes precompute (encrypt/modswitch/D2H).
+        double compute_sec = 0.0;
+
+        for (int base = 0; base < d_ff; base += chunk_size) {
+            const int end = std::min(d_ff, base + chunk_size);
+            host_chunk.clear();
+
+            // (1) Build encrypted inputs for this chunk and move them to host.
+            for (int j = base; j < end; ++j) {
+                PhantomCiphertext ct = encrypt_one_packed_column(d_ff, j);
+                vector<PhantomCiphertext> tmp{ct};
+                modswitch_to_depth(tmp, target_depth);
+                ct = std::move(tmp[0]);
+                host_chunk.push_back(export_to_host(ct));
+            }
+
+            // (2) Move this chunk to device and compute contributions.
+            // This keeps `chunk_size` ciphertexts resident in VRAM at once, matching the desired
+            // "hold half in VRAM, then swap" behavior (vs. 1-by-1 streaming).
+            cudaDeviceSynchronize();
+            const auto t0 = std::chrono::high_resolution_clock::now();
+
+            vector<PhantomCiphertext> dev_chunk;
+            dev_chunk.resize(host_chunk.size());
+            print_cuda_meminfo("[CT_PT_PROJ] fc2 before import_from_host(dev_chunk)");
+            for (size_t jj = 0; jj < host_chunk.size(); ++jj) {
+                import_from_host(host_chunk[jj], dev_chunk[jj]);
+            }
+            print_cuda_meminfo("[CT_PT_PROJ] fc2 after import_from_host(dev_chunk)");
+
+            for (size_t jj = 0; jj < dev_chunk.size(); ++jj) {
+                auto &ctj = dev_chunk[jj];
+                for (int i = 0; i < d_model; ++i) {
+                    PhantomPlaintext pt;
+                    encoder.encode(1.0 / 128.0, ctj.chain_index(), ctj.scale(), pt);
+                    if (!acc_init) {
+                        evaluator.multiply_plain(ctj, pt, acc[static_cast<size_t>(i)]);
+                    } else {
+                        PhantomCiphertext tmp;
+                        evaluator.multiply_plain(ctj, pt, tmp);
+                        evaluator.add_inplace(acc[static_cast<size_t>(i)], tmp);
+                    }
+                }
+                acc_init = true;
+            }
+
+            cudaDeviceSynchronize();
+            const auto t1 = std::chrono::high_resolution_clock::now();
+            compute_sec += std::chrono::duration_cast<std::chrono::duration<double>>(t1 - t0).count();
+        }
+
+        // Final rescale once for each output ciphertext.
+        cudaDeviceSynchronize();
+        const auto t_rs0 = std::chrono::high_resolution_clock::now();
+        for (int i = 0; i < d_model; ++i) {
+            evaluator.rescale_to_next_inplace(acc[static_cast<size_t>(i)]);
+            acc[static_cast<size_t>(i)].scale() = scale;
+        }
+        cudaDeviceSynchronize();
+        const auto t_rs1 = std::chrono::high_resolution_clock::now();
+        compute_sec += std::chrono::duration_cast<std::chrono::duration<double>>(t_rs1 - t_rs0).count();
+
+        const auto t_pre1 = std::chrono::high_resolution_clock::now();
+        const double precompute_sec = std::chrono::duration_cast<std::chrono::duration<double>>(t_pre1 - t_pre0).count();
+
+        cout << "[CT_PT_PROJ] fc2_precompute time_s=" << precompute_sec << endl;
+        cout << "[CT_PT_PROJ] fc2_compute time_s=" << compute_sec << endl;
+        cout << "[CT_PT_PROJ] fc2 time_s=" << (precompute_sec + compute_sec) << endl;
+        if (op != "all") return;
     }
 }
 

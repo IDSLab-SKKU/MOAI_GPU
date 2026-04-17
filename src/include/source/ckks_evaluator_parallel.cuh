@@ -121,6 +121,14 @@ namespace moai
         (void)stream_wrapper;
         return;
       }
+      // Optional legacy scalar encode mode: represent scalar as a full slot vector encode.
+      // Enable with MOAI_SCALAR_ENCODE_LEGACY_VEC=1 to match pre-fast-path behavior (includes IFFT/NTT work).
+      if (const char *ev = std::getenv("MOAI_SCALAR_ENCODE_LEGACY_VEC");
+          ev != nullptr && ev[0] != '\0' && std::strcmp(ev, "0") != 0) {
+        vector<double> values(encoder->slot_count(), value);
+        encoder->encode(*context, values, scale, plain, chain_index, stream_wrapper);
+        return;
+      }
       encoder->encode_uniform_real(*context, value, scale, plain, chain_index, stream_wrapper);
     }
 
@@ -139,6 +147,12 @@ namespace moai
         (void)scale;
         (void)plain;
         (void)stream_wrapper;
+        return;
+      }
+      if (const char *ev = std::getenv("MOAI_SCALAR_ENCODE_LEGACY_VEC");
+          ev != nullptr && ev[0] != '\0' && std::strcmp(ev, "0") != 0) {
+        vector<double> values(encoder->slot_count(), value);
+        encoder->encode(*context, values, scale, plain, 1, stream_wrapper);
         return;
       }
       encoder->encode_uniform_real(*context, value, scale, plain, 1, stream_wrapper);
