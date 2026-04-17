@@ -22,6 +22,84 @@ using namespace std;
 using namespace phantom;
 using namespace moai;
 
+void ct_pt_matrix_mul_sanity_small_test()
+{
+    cout << "Task: sanity check encode(double) fast path (small poly_degree)" << endl;
+
+    EncryptionParameters parms(scheme_type::ckks);
+    size_t poly_modulus_degree = 4096;
+    parms.set_poly_modulus_degree(poly_modulus_degree);
+    parms.set_coeff_modulus(CoeffModulus::Create(poly_modulus_degree, {50, 30, 30, 50}));
+    parms.set_sparse_slots(static_cast<long>(poly_modulus_degree / 2));
+    double scale = pow(2.0, 40);
+
+    PhantomContext context(parms);
+    print_parameters(context);
+
+    PhantomSecretKey secret_key(context);
+    PhantomPublicKey public_key = secret_key.gen_publickey(context);
+
+    Decryptor decryptor(&context, &secret_key);
+    PhantomCKKSEncoder phantom_encoder(context);
+    Encoder encoder(&context, &phantom_encoder);
+    Encryptor encryptor(&context, &public_key);
+
+    const size_t slot_count = encoder.slot_count();
+
+    vector<double> x(slot_count, 0.0);
+    for (size_t s = 0; s < std::min<size_t>(slot_count, 32); ++s)
+        x[s] = 0.01 * static_cast<double>(s + 1);
+
+    PhantomPlaintext pt_x;
+    encoder.encode(x, scale, pt_x);
+    PhantomCiphertext ct_x;
+    encryptor.encrypt(pt_x, ct_x);
+
+    const double w = -0.125;
+
+    PhantomPlaintext pt_w_vec;
+    vector<double> wvec(slot_count, w);
+    encoder.encode(wvec, ct_x.params_id(), ct_x.scale(), pt_w_vec);
+
+    PhantomPlaintext pt_w_uni;
+    encoder.encode(w, ct_x.params_id(), ct_x.scale(), pt_w_uni);
+
+    Evaluator evaluator(&context, &phantom_encoder);
+    PhantomCiphertext ct_y_vec, ct_y_uni;
+    evaluator.multiply_plain(ct_x, pt_w_vec, ct_y_vec);
+    evaluator.multiply_plain(ct_x, pt_w_uni, ct_y_uni);
+
+    PhantomPlaintext p_y_vec, p_y_uni;
+    decryptor.decrypt(ct_y_vec, p_y_vec);
+    decryptor.decrypt(ct_y_uni, p_y_uni);
+
+    vector<double> y_vec, y_uni;
+    encoder.decode(p_y_vec, y_vec);
+    encoder.decode(p_y_uni, y_uni);
+
+    double max_err_vec = 0.0;
+    double max_err_uni = 0.0;
+    double max_diff = 0.0;
+    for (size_t s = 0; s < std::min<size_t>(slot_count, 32); ++s)
+    {
+        const double expected = x[s] * w;
+        max_err_vec = std::max(max_err_vec, std::fabs(y_vec[s] - expected));
+        max_err_uni = std::max(max_err_uni, std::fabs(y_uni[s] - expected));
+        max_diff = std::max(max_diff, std::fabs(y_uni[s] - y_vec[s]));
+    }
+
+    const double tol = 1e-3;
+    cout << "[SANITY_SMALL] w=" << w << " tol=" << tol << endl;
+    cout << "[SANITY_SMALL] max_abs_err_vs_expected (legacy vec) = " << max_err_vec << endl;
+    cout << "[SANITY_SMALL] max_abs_err_vs_expected (fast uni)   = " << max_err_uni << endl;
+    cout << "[SANITY_SMALL] max_abs_diff(fast,legacy)           = " << max_diff << endl;
+
+    if (max_err_vec <= tol && max_err_uni <= tol && max_diff <= tol)
+        cout << "[SANITY_SMALL] PASS" << endl;
+    else
+        cout << "[SANITY_SMALL] FAIL" << endl;
+}
+
 void ct_pt_matrix_mul_sanity_test()
 {
     cout << "Task: sanity check encode(double) fast path preserves functionality" << endl;
@@ -376,7 +454,21 @@ void ct_pt_matrix_mul_test()
 
         vector<uint64_t> h_vec(n_u64), h_uni(n_u64);
         cudaMemcpy(h_vec.data(), pt_vec.data(), n_u64 * sizeof(uint64_t), cudaMemcpyDeviceToHost);
-        cudaMemcpy(h_uni.data(), pt_uni.data(), n_u64 * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+        if (pt_uni.is_ckks_broadcast_ntt()) {
+            const int64_t c = pt_uni.broadcast_scalar_coeff();
+            const uint64_t abs_c = static_cast<uint64_t>(c < 0 ? -static_cast<int64_t>(c) : c);
+            const auto &coeff_modulus = context.get_context_data(enc_ecd_x[0].params_id()).parms().coeff_modulus();
+            for (size_t j = 0; j < coeff_mod_size; ++j) {
+                const uint64_t q = coeff_modulus[j].value();
+                uint64_t r = static_cast<uint64_t>(abs_c % q);
+                if (c < 0 && r) r = q - r;
+                for (size_t k = 0; k < poly_degree; ++k) {
+                    h_uni[j * poly_degree + k] = r;
+                }
+            }
+        } else {
+            cudaMemcpy(h_uni.data(), pt_uni.data(), n_u64 * sizeof(uint64_t), cudaMemcpyDeviceToHost);
+        }
 
         size_t diff_cnt = 0;
         size_t first_diff = static_cast<size_t>(-1);

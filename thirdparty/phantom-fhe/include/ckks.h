@@ -29,7 +29,7 @@ private:
                          const cudaStream_t &stream);
 
     /** CKKS encode when every slot holds the same real value (broadcast). Skips slot-vector host fill and
-     *  `special_fft_backward` by reusing a precomputed linear-transform template for the all-ones slot vector. */
+     *  `special_fft_backward`: the pre-decompose message buffer is zero except slot 0 with real part `value*scale`. */
     void encode_internal_uniform_real(const PhantomContext &context, double value, size_t chain_index, double scale,
                                       PhantomPlaintext &destination, const cudaStream_t &stream);
 

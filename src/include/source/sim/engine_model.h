@@ -25,6 +25,8 @@ class EngineModel {
   struct EngineStats {
     uint64_t busy_cycles = 0;
     uint64_t bytes = 0;
+    // NTT/VEC: coefficient-elements (poly_degree * limbs scale) attributed per enqueue_* call.
+    uint64_t logical_ops = 0;
     uint64_t last_finish_cycles = 0;
   };
 
@@ -168,8 +170,10 @@ class EngineModel {
     const double eff_mhz = 1000.0 / period;
 
     os << std::fixed << std::setprecision(3);
+    // makespan_* = simulated wall time for this schedule (critical path): all modeled DMA + on-chip +
+    // NTT + VEC + RF traffic with overlap. Not the same as summing per-engine busy_cycles.
     os << "[MOAI_SIM_ENGINE] " << tag << " makespan_cycles=" << s.makespan_cycles
-       << " makespan_s=" << makespan_s << "\n";
+       << " makespan_s=" << makespan_s << " (crit.path wall: mem+engines, overlapped)\n";
 
     // Config sanity line (so logs are self-describing).
     const uint64_t gspad_eff_bw = std::max<uint64_t>(1, m_onchip.gspad_bw_gbps) * std::max<uint64_t>(1, m_onchip.gspad_banks);
@@ -201,11 +205,25 @@ class EngineModel {
        << " ks_moddown_bconv_cyc=" << m_cfg.kswitch_moddown_bconv_cyc_per_coeff
        << " galois_perm_cyc=" << m_cfg.galois_perm_cyc_per_coeff
        << " keyswitch_model=phantom_ckks_coarse"
+       << " coeff_ops=NTT/VEC logical coeff-elements/op (op/s columns)"
        << "\n";
 
+    const double ntt_steady_peak_gbps = theoretical_ntt_steady_coeff_equiv_gbps(m_cfg, period);
+    const double vec_mul_peak_gbps = theoretical_vec_mul_steady_coeff_equiv_gbps(m_cfg, period);
+    const double vec_add_peak_gbps = theoretical_vec_add_steady_coeff_equiv_gbps(m_cfg, period);
+    os << "[MOAI_SIM_ENGINE] steady_peak_coeff_equiv_GB/s (ideal lanes/steady, 8B/coeff; no fill/overhead): "
+       << "ntt=" << fmt_gbps(ntt_steady_peak_gbps) << " vec_mul=" << fmt_gbps(vec_mul_peak_gbps)
+       << " vec_add=" << fmt_gbps(vec_add_peak_gbps)
+       << " | onchip_RF_cfg_peak_GB/s ntt_rf_eff=" << static_cast<double>(ntt_rf_eff_bw)
+       << " vec_rf_eff=" << static_cast<double>(vec_rf_eff_bw) << " (bw×banks)\n";
+
     auto row = [&](const char *name, const EngineStats &e) {
-      const double gbps_busy = avg_throughput_gbps(e.bytes, e.busy_cycles, period);
-      const double gbps_span = avg_throughput_gbps(e.bytes, s.makespan_cycles, period);
+      const uint64_t gbps_bytes =
+          (e.bytes != 0) ? e.bytes : static_cast<uint64_t>(e.logical_ops * 8ULL);
+      const double gbps_busy = avg_throughput_gbps(gbps_bytes, e.busy_cycles, period);
+      const double gbps_span = avg_throughput_gbps(gbps_bytes, s.makespan_cycles, period);
+      const double opss_busy = avg_ops_per_sec(e.logical_ops, e.busy_cycles, period);
+      const double opss_span = avg_ops_per_sec(e.logical_ops, s.makespan_cycles, period);
       os << "[MOAI_SIM_ENGINE] "
          << std::left << std::setw(12) << name
          << std::right << std::setw(14) << e.busy_cycles
@@ -213,6 +231,9 @@ class EngineModel {
          << std::setw(16) << e.last_finish_cycles
          << std::setw(12) << fmt_gbps(gbps_busy)
          << std::setw(12) << fmt_gbps(gbps_span)
+         << std::setw(14) << e.logical_ops
+         << std::setw(14) << fmt_ops_s(opss_busy)
+         << std::setw(14) << fmt_ops_s(opss_span)
          << "\n";
     };
 
@@ -223,7 +244,12 @@ class EngineModel {
        << std::setw(16) << "last_finish"
        << std::setw(12) << "GB/s@busy"
        << std::setw(12) << "GB/s@span"
+       << std::setw(14) << "coeff_ops"
+       << std::setw(14) << "op/s@busy"
+       << std::setw(14) << "op/s@span"
        << "\n";
+    os << "[MOAI_SIM_ENGINE] GB/s columns: byte engines use counted bytes; ntt/vec with bytes=0 use "
+          "8B×coeff_ops (coeff-equiv) so GB/s aligns with op/s×8B.\n";
     row("dma", s.dma);
     row("ntt", s.ntt);
     row("vec", s.vec);
@@ -269,6 +295,23 @@ class EngineModel {
          << " data_move_busy/makespan=" << std::setprecision(2) << data_mov_busy_over_T
          << " compute_busy/makespan=" << compute_busy_over_T << " rough=" << rough
          << " (Σbusy/makespan can exceed 1 when engines overlap)\n";
+
+      // Engine "utilization" vs wall: busy_cycles / makespan (overlap ⇒ components can sum >100%).
+      auto util_pct = [&](uint64_t busy) -> double {
+        return 100.0 * static_cast<double>(busy) / static_cast<double>(T);
+      };
+      os << std::fixed << std::setprecision(1);
+      os << "[MOAI_SIM_ENGINE] util_pct@ms"
+         << " dma=" << util_pct(s.dma.busy_cycles) << "%"
+         << " ntt=" << util_pct(s.ntt.busy_cycles) << "%"
+         << " vec=" << util_pct(s.vec.busy_cycles) << "%"
+         << " onchip=" << util_pct(s.onchip_xfer.busy_cycles) << "%"
+         << " ntt_rf=" << util_pct(s.ntt_rf_xfer.busy_cycles) << "%"
+         << " vec_rf=" << util_pct(s.vec_rf_xfer.busy_cycles) << "%\n";
+      os << "[MOAI_SIM_ENGINE] util_agg@ms data_move%=" << (100.0 * data_mov_busy_over_T)
+         << " compute%=" << (100.0 * compute_busy_over_T)
+         << " (data_move=dma+onchip_xfer+ntt_rf_xfer+vec_rf; compute=ntt+vec; vs makespan wall)\n";
+      os.unsetf(std::ios_base::floatfield);
       os << std::setprecision(3);
     }
 
@@ -309,14 +352,14 @@ class EngineModel {
     m_ext_read_bytes += bytes;
     const uint64_t service = dma_service_cycles(bytes);
     m_ext_read_xfer_busy_cyc += service;
-    return schedule(m_dma, service, bytes, dep_done_cycles);
+    return schedule(m_dma, service, bytes, 0, dep_done_cycles);
   }
 
   uint64_t enqueue_dma_write(uint64_t bytes, uint64_t dep_done_cycles = 0) {
     m_ext_write_bytes += bytes;
     const uint64_t service = dma_service_cycles(bytes);
     m_ext_write_xfer_busy_cyc += service;
-    return schedule(m_dma, service, bytes, dep_done_cycles);
+    return schedule(m_dma, service, bytes, 0, dep_done_cycles);
   }
 
   // Device↔device style: model as read then write at same byte volume.
@@ -361,7 +404,7 @@ class EngineModel {
         m_gspad_onchip_misc_xfer_busy_cyc += service;
         break;
     }
-    return schedule(m_onchip_xfer, service, bytes, dep_done_cycles);
+    return schedule(m_onchip_xfer, service, bytes, 0, dep_done_cycles);
   }
 
   uint64_t enqueue_ntt_rf_xfer(uint64_t bytes, uint64_t dep_done_cycles, bool from_gspad) {
@@ -374,7 +417,7 @@ class EngineModel {
       m_vec_rf_to_ntt_rf_bytes += bytes;
       m_vec_rf_to_ntt_rf_xfer_busy_cyc += service;
     }
-    return schedule(m_ntt_rf_xfer, service, bytes, dep_done_cycles);
+    return schedule(m_ntt_rf_xfer, service, bytes, 0, dep_done_cycles);
   }
 
   uint64_t enqueue_vec_rf_xfer(uint64_t bytes, uint64_t dep_done_cycles, bool from_ntt_rf) {
@@ -387,13 +430,13 @@ class EngineModel {
       m_gspad_to_vec_rf_bytes += bytes;
       m_gspad_to_vec_rf_xfer_busy_cyc += service;
     }
-    return schedule(m_vec_rf_xfer, service, bytes, dep_done_cycles);
+    return schedule(m_vec_rf_xfer, service, bytes, 0, dep_done_cycles);
   }
 
   // NTT: pipeline fill (see ntt_pipe_depth_cyc / auto log2(N)) + steady ceil(coeffs/lanes)*steady_cyc.
   uint64_t enqueue_ntt_coeffs(uint64_t coeffs, uint64_t poly_degree, uint64_t dep_done_cycles = 0) {
     const uint64_t service = ntt_service_cycles(coeffs, poly_degree);
-    return schedule(m_ntt, service, 0, dep_done_cycles);
+    return schedule(m_ntt, service, 0, coeffs, dep_done_cycles);
   }
 
   // Generic vec op (e.g. rescale/modswitch); uses vec_lanes like mul/add.
@@ -401,7 +444,7 @@ class EngineModel {
     const uint64_t lanes = std::max<uint64_t>(1u, m_cfg.vec_lanes);
     const uint64_t waves = (coeffs + lanes - 1) / lanes;
     const uint64_t service = m_cfg.vec_pass_overhead_cyc + waves * cycles_per_coeff;
-    return schedule(m_vec, service, 0, dep_done_cycles);
+    return schedule(m_vec, service, 0, coeffs, dep_done_cycles);
   }
 
   uint64_t vec_mul_service_cycles(uint64_t coeffs) const {
@@ -413,7 +456,7 @@ class EngineModel {
 
   uint64_t enqueue_vec_mul(uint64_t coeffs, uint64_t dep_done_cycles = 0) {
     const uint64_t service = vec_mul_service_cycles(coeffs);
-    return schedule(m_vec, service, 0, dep_done_cycles);
+    return schedule(m_vec, service, 0, coeffs, dep_done_cycles);
   }
 
   uint64_t enqueue_vec_add(uint64_t coeffs, uint64_t dep_done_cycles = 0) {
@@ -808,12 +851,17 @@ class EngineModel {
     return true;
   }
 
-  uint64_t schedule(EngineStats &e, uint64_t service_cycles, uint64_t bytes, uint64_t dep_done_cycles) {
+  uint64_t schedule(EngineStats &e,
+                     uint64_t service_cycles,
+                     uint64_t bytes,
+                     uint64_t logical_ops,
+                     uint64_t dep_done_cycles) {
     const uint64_t start = std::max(e.last_finish_cycles, dep_done_cycles);
     const uint64_t finish = start + service_cycles;
     e.last_finish_cycles = finish;
     e.busy_cycles += service_cycles;
     e.bytes += bytes;
+    e.logical_ops += logical_ops;
     m_makespan = std::max(m_makespan, finish);
     return finish;
   }

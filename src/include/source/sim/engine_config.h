@@ -7,6 +7,8 @@
 #include <cstring>
 #include <string>
 
+#include "source/sim/sim_ckks_defaults.h"
+
 #if !defined(_WIN32)
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -22,6 +24,20 @@ inline uint64_t env_u64(const char *name, uint64_t def) {
   unsigned long long x = std::strtoull(v, &end, 10);
   if (end == v) return def;
   return static_cast<uint64_t>(x);
+}
+
+// One relin / Galois keyswitch DMA chunk (Phantom layout), same as MOAI_SIM `compute_key_bytes.py`:
+//   dnum * (2 * coeff_modulus_primes * N) * sizeof(uint64)
+// with dnum = (T - alpha) / alpha, T = |coeff_modulus|, alpha = MOAI_SIM_ALPHA (default 1).
+// Matches `build-genkeys/keys/keys_dnum_35/manifest.txt` for N=65536, T=36, alpha=1 -> 1321205760 bytes.
+inline uint64_t moai_sim_default_key_switch_bytes_per_use() {
+  const uint64_t N = env_u64("MOAI_SIM_POLY_DEGREE", kSingleLayerPolyModulusDegree());
+  const uint64_t T = env_u64("MOAI_SIM_NUM_LIMBS", static_cast<uint64_t>(kSingleLayerCoeffModulusCount()));
+  const uint64_t alpha = std::max<uint64_t>(1ULL, env_u64("MOAI_SIM_ALPHA", 1));
+  if (N == 0 || T == 0 || T <= alpha) return 0;
+  if ((T - alpha) % alpha != 0) return 0;
+  const uint64_t dnum = (T - alpha) / alpha;
+  return dnum * 2ull * T * N * 8ull;
 }
 
 // Optional positive float/double from env (MHz, GHz, etc.); returns false if unset/invalid.
@@ -81,6 +97,20 @@ inline double avg_throughput_gbps(uint64_t bytes, uint64_t cycles, double cycle_
   if (cycles == 0 || !std::isfinite(cycle_period_ns) || cycle_period_ns <= 0.0) return 0.0;
   const double sec = static_cast<double>(cycles) * cycle_period_ns * 1e-9;
   return static_cast<double>(bytes) / sec / 1e9;
+}
+
+// NTT/VEC logical throughput: coefficient-elements charged per schedule step, over busy or wall time.
+inline double avg_ops_per_sec(uint64_t ops, uint64_t cycles, double cycle_period_ns) {
+  if (cycles == 0 || !std::isfinite(cycle_period_ns) || cycle_period_ns <= 0.0) return 0.0;
+  const double sec = static_cast<double>(cycles) * cycle_period_ns * 1e-9;
+  return static_cast<double>(ops) / sec;
+}
+
+inline std::string fmt_ops_s(double opss) {
+  if (!std::isfinite(opss) || opss <= 0.0) return std::string("-");
+  char buf[64];
+  std::snprintf(buf, sizeof(buf), "%.4g", opss);
+  return std::string(buf);
 }
 
 // Default relative to process cwd (run from MOAI_GPU repo root): output/sim/...
@@ -165,7 +195,8 @@ struct EngineModelConfig {
   //   when enqueue passes poly_degree (e.g. N=2^16 -> 16 cycles).
   // - ntt_steady_cyc_per_coeff: per wavefront step after fill (often 1 when fully pipelined).
   // MOAI_SIM_NTT_CYC_PER_COEFF maps to ntt_steady_cyc_per_coeff (legacy name).
-  uint64_t ntt_lanes = 8;
+  // NOTE: 2^16 is (1<<16)==65536. Common mistake: (2<<16)==131072 (extra factor of two on lanes).
+  uint64_t ntt_lanes =  8;
   uint64_t ntt_pipe_depth_cyc = 0;
   uint64_t ntt_steady_cyc_per_coeff = 1;
 
@@ -182,7 +213,8 @@ struct EngineModelConfig {
   uint64_t ntt_pass_overhead_cyc = 0;
   uint64_t vec_pass_overhead_cyc = 0;
 
-  // Keys (bytes)
+  // Keys (bytes). `from_env()` sets from MOAI_SIM_GALOIS_KEY_BYTES / MOAI_SIM_RELIN_KEY_BYTES, or auto
+  // `dnum * 2 * T * N * 8` (see `moai_sim_default_key_switch_bytes_per_use()`). Set env to 0 to omit key DMA.
   uint64_t galois_key_bytes = 0;
   uint64_t relin_key_bytes = 0;
 
@@ -232,8 +264,8 @@ struct EngineModelConfig {
     c.modswitch_cyc_per_coeff = env_u64("MOAI_SIM_MODSWITCH_CYC_PER_COEFF", c.modswitch_cyc_per_coeff);
     c.ntt_pass_overhead_cyc = env_u64("MOAI_SIM_NTT_PASS_OVERHEAD_CYC", c.ntt_pass_overhead_cyc);
     c.vec_pass_overhead_cyc = env_u64("MOAI_SIM_VEC_PASS_OVERHEAD_CYC", c.vec_pass_overhead_cyc);
-    c.galois_key_bytes = env_u64("MOAI_SIM_GALOIS_KEY_BYTES", c.galois_key_bytes);
-    c.relin_key_bytes = env_u64("MOAI_SIM_RELIN_KEY_BYTES", c.relin_key_bytes);
+    c.galois_key_bytes = env_u64("MOAI_SIM_GALOIS_KEY_BYTES", moai_sim_default_key_switch_bytes_per_use());
+    c.relin_key_bytes = env_u64("MOAI_SIM_RELIN_KEY_BYTES", moai_sim_default_key_switch_bytes_per_use());
     c.ct_ct_vec_mul_passes = env_u64("MOAI_SIM_CT_CT_VEC_MUL_PASSES", c.ct_ct_vec_mul_passes);
     c.ct_ct_vec_mul_passes = std::max<uint64_t>(1ULL, c.ct_ct_vec_mul_passes);
     c.kswitch_size_p = std::max<uint64_t>(1ULL, env_u64("MOAI_SIM_KSWITCH_SIZE_P", c.kswitch_size_p));
@@ -246,6 +278,34 @@ struct EngineModelConfig {
     return c;
   }
 };
+
+// Ideal steady-state "coefficient stream" equivalent GB/s (decimal GB/s = 1e9 B/s): each logical coeff
+// element counted as 8B (uint64 RNS limb), matching the ntt/vec row when byte counters are zero.
+// Ignores pass overhead and pipe fill — same wave model as enqueue_ntt_coeffs / enqueue_vec_mul:
+// ceil(coeffs/lanes) waves × steady_cyc per wave ⇒ long-run ~steady/lanes cycles per coeff.
+inline double theoretical_ntt_steady_coeff_equiv_gbps(const EngineModelConfig &cfg, double cycle_period_ns) {
+  if (!std::isfinite(cycle_period_ns) || cycle_period_ns <= 0.0) return 0.0;
+  const double lanes = static_cast<double>(std::max<uint64_t>(1ULL, cfg.ntt_lanes));
+  const double steady = static_cast<double>(std::max<uint64_t>(1ULL, cfg.ntt_steady_cyc_per_coeff));
+  const double coeffs_per_s = (lanes / steady) / (cycle_period_ns * 1e-9);
+  return coeffs_per_s * 8.0 / 1e9;
+}
+
+inline double theoretical_vec_mul_steady_coeff_equiv_gbps(const EngineModelConfig &cfg, double cycle_period_ns) {
+  if (!std::isfinite(cycle_period_ns) || cycle_period_ns <= 0.0) return 0.0;
+  const double lanes = static_cast<double>(std::max<uint64_t>(1ULL, cfg.vec_lanes));
+  const double steady = static_cast<double>(std::max<uint64_t>(1ULL, cfg.vec_mul_steady_cyc_per_coeff));
+  const double coeffs_per_s = (lanes / steady) / (cycle_period_ns * 1e-9);
+  return coeffs_per_s * 8.0 / 1e9;
+}
+
+inline double theoretical_vec_add_steady_coeff_equiv_gbps(const EngineModelConfig &cfg, double cycle_period_ns) {
+  if (!std::isfinite(cycle_period_ns) || cycle_period_ns <= 0.0) return 0.0;
+  const double lanes = static_cast<double>(std::max<uint64_t>(1ULL, cfg.vec_lanes));
+  const double steady = static_cast<double>(std::max<uint64_t>(1ULL, cfg.vec_add_cyc_per_coeff));
+  const double coeffs_per_s = (lanes / steady) / (cycle_period_ns * 1e-9);
+  return coeffs_per_s * 8.0 / 1e9;
+}
 
 // Same formulas as EngineModel ntt_service_cycles / vec lane waves (for SimTiming alignment).
 inline uint64_t estimate_ntt_cycles(uint64_t coeffs, uint64_t poly_degree) {

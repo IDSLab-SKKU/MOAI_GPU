@@ -1,5 +1,47 @@
 #include "include.cuh"
+#include "source/sim/engine_config.h"
+
+#include <cstdio>
 #include <cstring>
+#include <string>
+
+#if !defined(_WIN32)
+// Tee-style redirect: whole-process stdout goes under output/test_logs/<name>.txt
+static void moai_redirect_test_stdout() {
+  if (const char *d = std::getenv("MOAI_TEST_OUTPUT_DISABLE"); d != nullptr && d[0] != '\0' && std::strcmp(d, "0") != 0)
+    return;
+
+  const char *explicit_path = std::getenv("MOAI_TEST_OUTPUT_PATH");
+  const char *bench = std::getenv("MOAI_BENCH_MODE");
+
+  std::string path;
+  if (explicit_path != nullptr && explicit_path[0] != '\0') {
+    path = explicit_path;
+  } else {
+    std::string tag = "default";
+    if (bench != nullptr && bench[0] != '\0') {
+      tag.assign(bench);
+      for (char &c : tag) {
+        if (c == '/' || c == '\\')
+          c = '_';
+      }
+    }
+    path = std::string("output/test_logs/") + tag + ".txt";
+  }
+
+  const char *mode = "w";
+  if (const char *a = std::getenv("MOAI_TEST_OUTPUT_APPEND"); a != nullptr && a[0] != '\0' && std::strcmp(a, "0") != 0)
+    mode = "a";
+
+  ::moai::sim::ensure_parent_dirs_for_file(path.c_str());
+  std::fflush(stdout);
+  if (std::freopen(path.c_str(), mode, stdout) == nullptr) {
+    std::perror("[MOAI_TEST] freopen stdout failed");
+  } else {
+    std::fprintf(stderr, "[MOAI_TEST] stdout -> %s (mode=%s)\n", path.c_str(), mode);
+  }
+}
+#endif
 // #include "test_ct_pt_matrix_mul.cuh"
 // #include "test_phantom_ckks.cuh"
 // #include "test_batch_encode_encrypt.cuh"
@@ -17,8 +59,12 @@ using namespace moai;
 
 int main()
 {
+#if !defined(_WIN32)
+    moai_redirect_test_stdout();
+#endif
     // Micro-benchmarks only (fixed CKKS params inside each test; no MOAI_ALPHA):
-    //   Sim reports (MOAI_SIM_BACKEND=1): default append file is output/sim/moai_sim_report.txt (cwd-relative).
+    //   Sim reports (MOAI_SIM_BACKEND=1): ct_pt/ct_ct append output/sim/moai_sim_report.txt by default.
+    //   sim_* primitives: one file per op — output/sim/primitive_<tag>.txt (see test_sim_primitives.cuh MOAI_SIM_REPORT_PATH).
     //   You must set MOAI_BENCH_MODE below; plain ./build/test does not run ct_pt.
     //   CT×CT knobs: MOAI_SIM_CT_CT_VEC_MUL_PASSES (default 3, coarse tensor/RNS proxy in enqueue_ct_ct_multiply).
     //   Keyswitch (Phantom-aligned coarse): MOAI_SIM_KSWITCH_SIZE_P, MOAI_SIM_KSWITCH_BETA (0=auto ceil(|Ql|/|P|)),
@@ -33,6 +79,14 @@ int main()
     //   MOAI_BENCH_MODE=softmax | softmax_boot -> single test only
     //   MOAI_BENCH_MODE=gelu      -> gelu_test() (nsys: src/scripts/profile_gelu_micro.sh)
     //   MOAI_BENCH_MODE=layernorm -> layernorm_test() (nsys: src/scripts/profile_layernorm_micro.sh)
+    //   Per-primitive sim (estimator-only, MOAI_SIM_BACKEND=1): MOAI_BENCH_MODE=sim_primitive + MOAI_SIM_PRIMITIVE
+    //   (mul_plain|mul_ct|add_inplace|rescale|rotate|relin|modswitch|all). Shortcuts: sim_mul_plain, sim_mul_ct,
+    //   sim_add_inplace, sim_rescale, sim_rotate, sim_relin, sim_modswitch, sim_primitives (= all).
+    //   N,T: MOAI_SIM_POLY_DEGREE, MOAI_SIM_NUM_LIMBS (defaults = single_layer: sim_ckks_defaults.h, N=65536 T=36);
+    //   repeat: MOAI_SIM_PRIMITIVE_LOOPS (default 1).
+    //   Stdout log: default output/test_logs/<MOAI_BENCH_MODE>.txt (or default.txt if unset). Override with
+    //   MOAI_TEST_OUTPUT_PATH, disable with MOAI_TEST_OUTPUT_DISABLE=1, append with MOAI_TEST_OUTPUT_APPEND=1.
+    //   rotate/relin/modswitch: SimTiming coarse rows stay 0; engine model carries traffic (keyswitch etc.).
     // Unset -> single_layer_test() below.
     if (const char *bench = std::getenv("MOAI_BENCH_MODE");
         bench != nullptr && bench[0] != '\0') {
@@ -46,6 +100,10 @@ int main()
         }
         if (std::strcmp(bench, "ct_pt_sanity") == 0) {
             ct_pt_matrix_mul_sanity_test();
+            return 0;
+        }
+        if (std::strcmp(bench, "ct_pt_sanity_small") == 0) {
+            ct_pt_matrix_mul_sanity_small_test();
             return 0;
         }
         if (std::strcmp(bench, "ct_pt_pre") == 0) {
@@ -76,10 +134,48 @@ int main()
             layernorm_test();
             return 0;
         }
+        if (std::strcmp(bench, "sim_primitive") == 0) {
+            const char *p = std::getenv("MOAI_SIM_PRIMITIVE");
+            moai_sim_primitive_micro_bench((p != nullptr && p[0] != '\0') ? p : "all");
+            return 0;
+        }
+        if (std::strcmp(bench, "sim_mul_plain") == 0) {
+            moai_sim_primitive_micro_bench("mul_plain");
+            return 0;
+        }
+        if (std::strcmp(bench, "sim_mul_ct") == 0) {
+            moai_sim_primitive_micro_bench("mul_ct");
+            return 0;
+        }
+        if (std::strcmp(bench, "sim_add_inplace") == 0) {
+            moai_sim_primitive_micro_bench("add_inplace");
+            return 0;
+        }
+        if (std::strcmp(bench, "sim_rescale") == 0) {
+            moai_sim_primitive_micro_bench("rescale");
+            return 0;
+        }
+        if (std::strcmp(bench, "sim_rotate") == 0) {
+            moai_sim_primitive_micro_bench("rotate");
+            return 0;
+        }
+        if (std::strcmp(bench, "sim_relin") == 0) {
+            moai_sim_primitive_micro_bench("relin");
+            return 0;
+        }
+        if (std::strcmp(bench, "sim_modswitch") == 0) {
+            moai_sim_primitive_micro_bench("modswitch");
+            return 0;
+        }
+        if (std::strcmp(bench, "sim_primitives") == 0) {
+            moai_sim_primitive_micro_bench("all");
+            return 0;
+        }
         std::cerr << "MOAI_BENCH_MODE='" << bench
                   << "' — use boot | bootstrap_micro | ct_pt | ct_pt_sanity | ct_pt_pre | ct_ct | softmax_micro | softmax | "
                      "softmax_boot | gelu | "
-                     "layernorm | "
+                     "layernorm | sim_primitive | sim_primitives | sim_mul_plain | sim_mul_ct | sim_add_inplace | "
+                     "sim_rescale | sim_rotate | sim_relin | sim_modswitch | "
                      "(unset for single_layer)\n";
         return 2;
     }

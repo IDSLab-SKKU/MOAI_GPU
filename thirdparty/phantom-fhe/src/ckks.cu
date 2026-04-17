@@ -1,8 +1,10 @@
 #include "ckks.h"
 #include "fft.h"
 
-#include <mutex>
-#include <unordered_map>
+#include <cmath>
+
+// for compute_shoup
+#include "util/uintarithsmallmod.h"
 
 using namespace std;
 using namespace phantom;
@@ -27,6 +29,20 @@ __global__ void bit_reverse(cuDoubleComplex *dst, cuDoubleComplex *src, uint32_t
          tid < slots;
          tid += blockDim.x * gridDim.x) {
         dst[reverse_bits_uint32(tid, logn)] = src[tid];
+    }
+}
+
+// For CKKS scalar-broadcast encoding, the coeff-domain plaintext after `decompose_array` has only
+// coefficient 0 potentially non-zero for each modulus limb. In NTT/evaluation form that corresponds
+// to broadcasting that value across all N coefficients in the limb.
+__global__ void ckks_broadcast_slot0_per_modulus_inplace(uint64_t *pt, uint32_t poly_degree, uint32_t coeff_mod_size) {
+    for (uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+         tid < poly_degree * coeff_mod_size;
+         tid += blockDim.x * gridDim.x) {
+        const uint32_t limb = tid / poly_degree;
+        const uint32_t idx = tid - limb * poly_degree;
+        const uint64_t v0 = pt[static_cast<size_t>(limb) * poly_degree];
+        pt[static_cast<size_t>(limb) * poly_degree + idx] = v0;
     }
 }
 
@@ -248,59 +264,6 @@ void PhantomCKKSEncoder::decode_internal(const PhantomContext &context, const Ph
     cudaStreamSynchronize(stream);
 }
 
-namespace {
-
-struct CkksUniformSlotBasisCache {
-    cuDoubleComplex *basis = nullptr; // device pointer; intentionally leaked for process lifetime
-    double max_abs = 0.0;
-};
-
-std::mutex g_ckks_uniform_basis_mu;
-std::unordered_map<uint32_t, CkksUniformSlotBasisCache> g_ckks_uniform_basis_by_slots;
-
-__global__ void ckks_fill_unit_real_kernel(cuDoubleComplex *dst, uint32_t n) {
-    for (uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x; tid < n; tid += blockDim.x * gridDim.x) {
-        dst[tid] = make_cuDoubleComplex(1.0, 0.0);
-    }
-}
-
-__global__ void ckks_scale_complex_by_real_kernel(const cuDoubleComplex *src, cuDoubleComplex *dst, uint32_t n,
-                                                  double s) {
-    for (uint32_t tid = blockIdx.x * blockDim.x + threadIdx.x; tid < n; tid += blockDim.x * gridDim.x) {
-        cuDoubleComplex b = src[tid];
-        dst[tid] = make_cuDoubleComplex(b.x * s, b.y * s);
-    }
-}
-
-const CkksUniformSlotBasisCache &get_ckks_uniform_basis(uint32_t slots, DCKKSEncoderInfo &gp, const cudaStream_t &stream) {
-    std::lock_guard<std::mutex> lock(g_ckks_uniform_basis_mu);
-    auto [it, inserted] = g_ckks_uniform_basis_by_slots.try_emplace(slots);
-    CkksUniformSlotBasisCache &cache = it->second;
-    if (inserted) {
-        // Use cudaMalloc (not cudaMallocAsync) to ensure the pointer is usable across streams without
-        // relying on stream-ordered allocation semantics.
-        PHANTOM_CHECK_CUDA(cudaMalloc(reinterpret_cast<void **>(&cache.basis), slots * sizeof(cuDoubleComplex)));
-        gp.set_sparse_slots(slots);
-        PHANTOM_CHECK_CUDA(cudaMemsetAsync(gp.in(), 0, slots * sizeof(cuDoubleComplex), stream));
-        const uint32_t grid = (slots + blockDimGlb.x - 1) / blockDimGlb.x;
-        ckks_fill_unit_real_kernel<<<grid, blockDimGlb, 0, stream>>>(gp.in(), slots);
-        special_fft_backward(gp, 1.0, stream);
-        PHANTOM_CHECK_CUDA(cudaMemcpyAsync(cache.basis, gp.in(), slots * sizeof(cuDoubleComplex),
-                                           cudaMemcpyDeviceToDevice, stream));
-        PHANTOM_CHECK_CUDA(cudaStreamSynchronize(stream));
-        vector<cuDoubleComplex> host(slots);
-        PHANTOM_CHECK_CUDA(
-                cudaMemcpy(host.data(), cache.basis, slots * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
-        for (uint32_t i = 0; i < slots; ++i) {
-            cache.max_abs = std::max(cache.max_abs, std::fabs(host[i].x));
-            cache.max_abs = std::max(cache.max_abs, std::fabs(host[i].y));
-        }
-    }
-    return cache;
-}
-
-} // namespace
-
 void PhantomCKKSEncoder::encode_internal_uniform_real(const PhantomContext &context, double value, size_t chain_index,
                                                       double scale, PhantomPlaintext &destination,
                                                       const cudaStream_t &stream) {
@@ -324,25 +287,29 @@ void PhantomCKKSEncoder::encode_internal_uniform_real(const PhantomContext &cont
     sparse_slots_ = slots_;
     gpu_ckks_msg_vec_->set_sparse_slots(slots_);
 
-    const CkksUniformSlotBasisCache &basis_cache = get_ckks_uniform_basis(slots_, *gpu_ckks_msg_vec_, stream);
+    // Same real in every slot: the slot-domain buffer before `decompose_array` is zero except index 0,
+    // where the real part is `value * scale` (equivalently `(value * scale/slots) * slots` from the
+    // prior basis+IFFT formulation). No `special_fft_backward` or cached basis is required.
+    PHANTOM_CHECK_CUDA(cudaMemsetAsync(gpu_ckks_msg_vec_->in(), 0, slots_ * sizeof(cuDoubleComplex), stream));
+    const double dc_re = value * scale;
+    const cuDoubleComplex dc = make_cuDoubleComplex(dc_re, 0.0);
+    PHANTOM_CHECK_CUDA(cudaMemcpyAsync(gpu_ckks_msg_vec_->in(), &dc, sizeof(cuDoubleComplex), cudaMemcpyHostToDevice,
+                                       stream));
 
-    const double fix = scale / static_cast<double>(slots_);
-    const double scaled_value = value * fix;
-    const uint32_t grid_dim = (slots_ + blockDimGlb.x - 1) / blockDimGlb.x;
-    ckks_scale_complex_by_real_kernel<<<grid_dim, blockDimGlb, 0, stream>>>(
-            basis_cache.basis, gpu_ckks_msg_vec_->in(), slots_, scaled_value);
-
-    const double max_coeff = std::fabs(scaled_value) * basis_cache.max_abs;
+    const double max_coeff = std::fabs(dc_re);
     const int max_coeff_bit_count = static_cast<int>(std::ceil(std::log2(std::max(max_coeff, 1.0)))) + 1;
 
     if (max_coeff_bit_count >= context_data.total_coeff_modulus_bit_count()) {
         throw std::invalid_argument("encoded values are too large");
     }
 
-    rns_tool.base_Ql().decompose_array(destination.data(), gpu_ckks_msg_vec_->in(), slots_ << 1, 1u,
-                                         max_coeff_bit_count, stream);
-
-    nwt_2d_radix8_forward_inplace(destination.data(), context.gpu_rns_tables(), coeff_modulus_size, 0, stream);
+    // 2nd-stage fast path: avoid materializing full NTT plaintext polynomial.
+    // For uniform-real scalar encoding in this implementation, the coeff-domain polynomial after decompose
+    // has only coefficient 0 potentially non-zero for each modulus limb. In NTT/evaluation form this is
+    // a broadcast across all coefficients with value (round(value*scale) mod qj).
+    const long long coeff_ll = llround(dc_re);
+    destination.rep_ = PhantomPlaintext::ckks_plain_rep::broadcast_ntt;
+    destination.broadcast_scalar_coeff_ = static_cast<int64_t>(coeff_ll);
 
     destination.chain_index_ = chain_index;
     destination.scale_ = scale;

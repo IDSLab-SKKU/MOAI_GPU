@@ -15,12 +15,23 @@ class PhantomPlaintext {
 
 private:
 
+    enum class ckks_plain_rep : uint8_t {
+        full_ntt = 0,
+        broadcast_ntt = 1,
+    };
+
     phantom::parms_id_type parms_id_ = phantom::parms_id_zero;
     std::size_t chain_index_ = 0;
     std::size_t poly_modulus_degree_ = 0;
     size_t coeff_modulus_size_ = 0;
     double scale_ = 1.0;
     phantom::util::cuda_auto_ptr<uint64_t> data_;
+
+    // Optional fast-path representation for CKKS scalar-broadcast plaintexts in NTT form.
+    // When rep_ == broadcast_ntt, the NTT-domain polynomial is conceptually
+    //   limb j: [scalar_coeff_ mod qj, ..., scalar_coeff_ mod qj] (length poly_modulus_degree_).
+    ckks_plain_rep rep_{ckks_plain_rep::full_ntt};
+    int64_t broadcast_scalar_coeff_{0}; // stores llround(value*scale)
 
 public:
 
@@ -41,6 +52,9 @@ public:
 
         coeff_modulus_size_ = coeff_modulus_size;
         poly_modulus_degree_ = poly_modulus_degree;
+
+        rep_ = ckks_plain_rep::full_ntt;
+        broadcast_scalar_coeff_ = 0;
     }
 
     void set_chain_index(const size_t chain_index) {
@@ -81,5 +95,13 @@ public:
 
     [[nodiscard]] auto &data_ptr() noexcept {
         return data_;
+    }
+
+    [[nodiscard]] bool is_ckks_broadcast_ntt() const noexcept {
+        return rep_ == ckks_plain_rep::broadcast_ntt;
+    }
+
+    [[nodiscard]] int64_t broadcast_scalar_coeff() const noexcept {
+        return broadcast_scalar_coeff_;
     }
 };

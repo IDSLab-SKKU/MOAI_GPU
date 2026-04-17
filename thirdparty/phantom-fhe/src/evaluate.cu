@@ -10,6 +10,71 @@ using namespace phantom;
 using namespace phantom::util;
 using namespace phantom::arith;
 
+__global__ void add_broadcast_scalar_rns_poly_inplace(uint64_t *ct0,
+                                                     const int64_t scalar_coeff,
+                                                     const DModulus *modulus,
+                                                     uint64_t poly_degree,
+                                                     uint64_t coeff_mod_size) {
+    for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+         tid < poly_degree * coeff_mod_size;
+         tid += blockDim.x * gridDim.x) {
+        const size_t twr = tid / poly_degree;
+        const uint64_t q = modulus[twr].value();
+        const int64_t c = scalar_coeff;
+        const uint64_t abs_c = static_cast<uint64_t>(c < 0 ? -static_cast<int64_t>(c) : c);
+        uint64_t addv = static_cast<uint64_t>(abs_c % q);
+        if (c < 0 && addv) {
+            addv = q - addv;
+        }
+        uint64_t x = ct0[tid] + addv;
+        if (x >= q) x -= q;
+        ct0[tid] = x;
+    }
+}
+
+__global__ void sub_broadcast_scalar_rns_poly_inplace(uint64_t *ct0,
+                                                     const int64_t scalar_coeff,
+                                                     const DModulus *modulus,
+                                                     uint64_t poly_degree,
+                                                     uint64_t coeff_mod_size) {
+    for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+         tid < poly_degree * coeff_mod_size;
+         tid += blockDim.x * gridDim.x) {
+        const size_t twr = tid / poly_degree;
+        const uint64_t q = modulus[twr].value();
+        const int64_t c = scalar_coeff;
+        const uint64_t abs_c = static_cast<uint64_t>(c < 0 ? -static_cast<int64_t>(c) : c);
+        uint64_t subv = static_cast<uint64_t>(abs_c % q);
+        if (c < 0 && subv) {
+            subv = q - subv;
+        }
+        uint64_t x = ct0[tid];
+        ct0[tid] = (x >= subv) ? (x - subv) : (x + q - subv);
+    }
+}
+
+__global__ void multiply_broadcast_scalar_coeff_rns_poly_inplace(const uint64_t *operand,
+                                                                 int64_t scalar_coeff,
+                                                                 const DModulus *modulus,
+                                                                 uint64_t *result,
+                                                                 uint64_t poly_degree,
+                                                                 uint64_t coeff_mod_size) {
+    for (size_t tid = blockIdx.x * blockDim.x + threadIdx.x;
+         tid < poly_degree * coeff_mod_size;
+         tid += blockDim.x * gridDim.x) {
+        const size_t twr = tid / poly_degree;
+        DModulus mod = modulus[twr];
+        const uint64_t q = mod.value();
+        const int64_t c = scalar_coeff;
+        const uint64_t abs_c = static_cast<uint64_t>(c < 0 ? -static_cast<int64_t>(c) : c);
+        uint64_t r = static_cast<uint64_t>(abs_c % q);
+        if (c < 0 && r) {
+            r = q - r;
+        }
+        result[tid] = multiply_and_barrett_reduce_uint64(operand[tid], r, q, mod.const_ratio());
+    }
+}
+
 /**
 Returns (f, e1, e2) such that
 (1) e1 * factor1 = e2 * factor2 = f mod p;
@@ -1150,9 +1215,14 @@ void add_plain_inplace(const PhantomContext &context, PhantomCiphertext &encrypt
         }
         case scheme_type::ckks: {
             // (c0 + pt, c1)
-            add_rns_poly<<<gridDimGlb, blockDimGlb, 0, s>>>(
-                    encrypted.data(), plain.data(), base_rns, encrypted.data(),
-                    poly_degree, coeff_mod_size);
+            if (plain.is_ckks_broadcast_ntt()) {
+                add_broadcast_scalar_rns_poly_inplace<<<gridDimGlb, blockDimGlb, 0, s>>>(
+                        encrypted.data(), plain.broadcast_scalar_coeff(), base_rns, poly_degree, coeff_mod_size);
+            } else {
+                add_rns_poly<<<gridDimGlb, blockDimGlb, 0, s>>>(
+                        encrypted.data(), plain.data(), base_rns, encrypted.data(),
+                        poly_degree, coeff_mod_size);
+            }
             break;
         }
         case scheme_type::bgv: {
@@ -1209,9 +1279,14 @@ void sub_plain_inplace(const PhantomContext &context, PhantomCiphertext &encrypt
         }
         case scheme_type::ckks: {
             // (c0 - pt, c1)
-            sub_rns_poly<<<gridDimGlb, blockDimGlb, 0, s>>>(
-                    encrypted.data(), plain.data(), base_rns, encrypted.data(),
-                    poly_degree, coeff_mod_size);
+            if (plain.is_ckks_broadcast_ntt()) {
+                sub_broadcast_scalar_rns_poly_inplace<<<gridDimGlb, blockDimGlb, 0, s>>>(
+                        encrypted.data(), plain.broadcast_scalar_coeff(), base_rns, poly_degree, coeff_mod_size);
+            } else {
+                sub_rns_poly<<<gridDimGlb, blockDimGlb, 0, s>>>(
+                        encrypted.data(), plain.data(), base_rns, encrypted.data(),
+                        poly_degree, coeff_mod_size);
+            }
             break;
         }
         case scheme_type::bgv: {
@@ -1257,9 +1332,19 @@ static void multiply_plain_ntt(const PhantomContext &context, PhantomCiphertext 
     //(c0 * pt, c1 * pt)
     for (size_t i = 0; i < encrypted.size(); i++) {
         uint64_t gridDimGlb = poly_degree * coeff_mod_size / blockDimGlb.x;
-        multiply_rns_poly<<<gridDimGlb, blockDimGlb, 0, stream>>>(
-                encrypted.data() + i * rns_coeff_count, plain.data(), base_rns,
-                encrypted.data() + i * rns_coeff_count, poly_degree, coeff_mod_size);
+        if (plain.is_ckks_broadcast_ntt()) {
+            multiply_broadcast_scalar_coeff_rns_poly_inplace<<<gridDimGlb, blockDimGlb, 0, stream>>>(
+                    encrypted.data() + i * rns_coeff_count,
+                    plain.broadcast_scalar_coeff(),
+                    base_rns,
+                    encrypted.data() + i * rns_coeff_count,
+                    poly_degree,
+                    coeff_mod_size);
+        } else {
+            multiply_rns_poly<<<gridDimGlb, blockDimGlb, 0, stream>>>(
+                    encrypted.data() + i * rns_coeff_count, plain.data(), base_rns,
+                    encrypted.data() + i * rns_coeff_count, poly_degree, coeff_mod_size);
+        }
     }
 
     encrypted.set_scale(new_scale);

@@ -207,6 +207,7 @@ vector<PhantomCiphertext> deep_copy_cipher(const vector<PhantomCiphertext> &src,
 #include "test/non_linear_func/test_BPmax_BatchLN.cuh"
 #include "test/test_single_layer.cuh"
 #include "test/matrix_mul/test_rotary_position_embedding.cuh"
+#include "test/sim/test_sim_primitives.cuh"
 #include "test/non_linear_func/test_causal_masked_softmax.cuh"
 #include "test/non_linear_func/test_silu.cuh"
 #include "test/non_linear_func/test_RMSNorm.cuh"

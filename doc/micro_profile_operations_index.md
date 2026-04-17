@@ -12,6 +12,7 @@
 | **프로파일** | `nsys` (Nsight Systems), `python3`, 선택 **`matplotlib`** (`export_ct_pt_kern_sum.py` PNG). |
 | **공통 플레이북** | [`micro_profile_playbook.md`](micro_profile_playbook.md) |
 | **가속기 문서 절** | [`moai_accelerator_simulator_analysis.md`](moai_accelerator_simulator_analysis.md) §12 이후 (ct_pt, ct_pt_pre, ct_ct, softmax, gelu, layernorm, bootstrap, 플레이북). |
+| **시뮬레이터 실행·env** | [`simulator_guide.md`](simulator_guide.md) — `MOAI_SIM_*`, `EngineModel`, primitive 마이크로 벤치. |
 
 ---
 
@@ -30,6 +31,11 @@
 | `softmax_boot` | `softmax_boot_test()` | 단독 |
 | `gelu` | `gelu_test()` | |
 | `layernorm` | `layernorm_test()` | |
+| `sim_primitive` | `moai_sim_primitive_micro_bench(MOAI_SIM_PRIMITIVE)` | `MOAI_SIM_BACKEND=1` 필수. `MOAI_SIM_PRIMITIVE` 미설정 시 `all` |
+| `sim_primitives` | 위와 동일 (`all`) | primitive마다 **별도 `.txt`** (`primitive_<tag>.txt` 등; `MOAI_SIM_REPORT_PATH` 해석은 `test_sim_primitives.cuh` 참고) |
+| `sim_mul_plain` … `sim_modswitch` | 단일 primitive (`mul_plain`, `mul_ct`, `add_inplace`, `rescale`, `rotate`, `relin`, `modswitch`) | `test/sim/test_sim_primitives.cuh` |
+
+**Primitive sim 공통 env:** `MOAI_SIM_POLY_DEGREE`, `MOAI_SIM_NUM_LIMBS` (기본은 `single_layer_test` 와 동일: `sim_ckks_defaults.h` — 65536, 36), `MOAI_SIM_PRIMITIVE_LOOPS`, `MOAI_SIM_REPORT_PATH`(primitive는 **태그별 파일**; 단일 `moai_sim_report.txt`에 append하지 않음), `MOAI_SIM_REPORT_QUIET`, `MOAI_SIM_ENGINE_MODEL`. `rotate` / `relin` 은 coarse `SimTiming` 행 없이 **엔진 모델**만 증가.
 
 ---
 

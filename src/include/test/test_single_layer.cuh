@@ -1,5 +1,6 @@
 #include "include.cuh"
 #include "keys/moai_precomputed_keys.cuh"
+#include "source/sim/sim_ckks_defaults.h"
 
 using namespace std;
 using namespace phantom;
@@ -390,7 +391,7 @@ void single_layer_test()
     long scale_factor = 2;
     long inverse_deg = 1;
 
-    long logN = 16;
+    long logN = static_cast<long>(moai::sim::kSingleLayerLogN);
     long loge = 10;
 
     long logn = 15;
@@ -402,13 +403,13 @@ void single_layer_test()
 
     int secret_key_hamming_weight = 192;
 
-    // Calculation required
-    int boot_level = 14; // >= subsum 1 + coefftoslot 2 + ModReduction 9 + slottocoeff 2
+    // Calculation required (defaults shared with `sim_ckks_defaults.h` for primitive sim).
+    int boot_level = moai::sim::kSingleLayerBootLevel; // >= subsum 1 + coefftoslot 2 + ModReduction 9 + slottocoeff 2
     // remaining_level_att set after MOAI_ALPHA (must satisfy pre-attention mod-switch budget; see below)
 
     // Total primes T = 1 + remaining_level + boot_level + 1.
     // Original MOAI single-layer recipe uses remaining_level=20 (T=36 when boot_level=14).
-    int remaining_level = 20;
+    int remaining_level = moai::sim::kSingleLayerRemainingLevel;
     int total_level = remaining_level + boot_level;
 
     vector<int> coeff_bit_vec;
