@@ -34,8 +34,9 @@
 | `sim_primitive` | `moai_sim_primitive_micro_bench(MOAI_SIM_PRIMITIVE)` | `MOAI_SIM_BACKEND=1` 필수. `MOAI_SIM_PRIMITIVE` 미설정 시 `all` |
 | `sim_primitives` | 위와 동일 (`all`) | primitive마다 **별도 `.txt`** (`primitive_<tag>.txt` 등; `MOAI_SIM_REPORT_PATH` 해석은 `test_sim_primitives.cuh` 참고) |
 | `sim_mul_plain` … `sim_modswitch` | 단일 primitive (`mul_plain`, `mul_ct`, `add_inplace`, `rescale`, `rotate`, `relin`, `modswitch`) | `test/sim/test_sim_primitives.cuh` |
+| `sim_hybrid_ks_profile` | `moai_sim_hybrid_ks_profile_run()` — α 목록별 NTT/BConv 등 **구조적 카운트** + CSV | `source/sim/keyswitch_op_profile.h`; GPU 불필요 |
 
-**Primitive sim 공통 env:** `MOAI_SIM_POLY_DEGREE`, `MOAI_SIM_NUM_LIMBS` (기본은 `single_layer_test` 와 동일: `sim_ckks_defaults.h` — 65536, 36), `MOAI_SIM_PRIMITIVE_LOOPS`, `MOAI_SIM_REPORT_PATH`(primitive는 **태그별 파일**; 단일 `moai_sim_report.txt`에 append하지 않음), `MOAI_SIM_REPORT_QUIET`, `MOAI_SIM_ENGINE_MODEL`. `rotate` / `relin` 은 coarse `SimTiming` 행 없이 **엔진 모델**만 증가.
+**Primitive sim 공통 env:** `MOAI_SIM_POLY_DEGREE`, `MOAI_SIM_NUM_LIMBS` (기본 **\|QP\|**=36 등, `sim_ckks_defaults.h`), **`MOAI_SIM_ALPHA`**, **`MOAI_SIM_NUM_LIMBS_COUNTS_QP`**(기본 1: \|Ql\|=\|QP\|−α), `MOAI_SIM_PRIMITIVE_LOOPS`, `MOAI_SIM_REPORT_PATH`(primitive는 **태그별 파일**; 단일 `moai_sim_report.txt`에 append하지 않음), `MOAI_SIM_REPORT_QUIET`, `MOAI_SIM_ENGINE_MODEL`. `rotate` / `relin` 은 coarse `SimTiming` 행 없이 **엔진 모델**만 증가.
 
 ---
 

@@ -28,13 +28,21 @@ class EngineModel {
     // NTT/VEC: coefficient-elements (poly_degree * limbs scale) attributed per enqueue_* call.
     uint64_t logical_ops = 0;
     uint64_t last_finish_cycles = 0;
+    // schedule() invocations for this engine (DMA / NTT / vec / xfer buckets).
+    uint64_t enqueue_calls = 0;
   };
 
   struct Summary {
     uint64_t makespan_cycles = 0;
     EngineStats dma{};
     EngineStats ntt{};
+    // Same physical NTT pipe as `ntt`; split by enqueue_ntt_coeffs(..., ntt_inverse).
+    EngineStats ntt_fwd{};
+    EngineStats ntt_inv{};
     EngineStats vec{};
+    // Same physical VEC pipe as `vec`; keyswitch modup/moddown `enqueue_vec_coeffs` vs mul/add.
+    EngineStats vec_bconv{};
+    EngineStats vec_arith{};
 
     // On-chip transfer + capacity accounting (rough)
     EngineStats onchip_xfer{};
@@ -86,7 +94,11 @@ class EngineModel {
     m_onchip = OnChipConfig::from_env();
     m_dma = {};
     m_ntt = {};
+    m_ntt_fwd = {};
+    m_ntt_inv = {};
     m_vec = {};
+    m_vec_bconv = {};
+    m_vec_arith = {};
     m_onchip_xfer = {};
     m_ntt_rf_xfer = {};
     m_vec_rf_xfer = {};
@@ -130,7 +142,11 @@ class EngineModel {
     s.makespan_cycles = m_makespan;
     s.dma = m_dma;
     s.ntt = m_ntt;
+    s.ntt_fwd = m_ntt_fwd;
+    s.ntt_inv = m_ntt_inv;
     s.vec = m_vec;
+    s.vec_bconv = m_vec_bconv;
+    s.vec_arith = m_vec_arith;
     s.onchip_xfer = m_onchip_xfer;
     s.ntt_rf_xfer = m_ntt_rf_xfer;
     s.vec_rf_xfer = m_vec_rf_xfer;
@@ -200,7 +216,9 @@ class EngineModel {
        << " vec_lanes=" << m_cfg.vec_lanes
        << " vec_add_cyc=" << m_cfg.vec_add_cyc_per_coeff
        << " vec_mul_steady_cyc(db)=" << m_cfg.vec_mul_steady_cyc_per_coeff
-       << " kswitch_P=" << m_cfg.kswitch_size_p << " kswitch_beta_env=" << m_cfg.kswitch_beta
+       << " kswitch_P=" << m_cfg.kswitch_size_p << " ks_alpha=" << m_cfg.kswitch_digit_alpha
+       << " ks_beta_mode=" << (m_cfg.kswitch_beta_legacy ? "legacy" : "phantom")
+       << " kswitch_beta_env=" << m_cfg.kswitch_beta
        << " ks_modup_bconv_cyc=" << m_cfg.kswitch_modup_bconv_cyc_per_coeff
        << " ks_moddown_bconv_cyc=" << m_cfg.kswitch_moddown_bconv_cyc_per_coeff
        << " galois_perm_cyc=" << m_cfg.galois_perm_cyc_per_coeff
@@ -234,6 +252,7 @@ class EngineModel {
          << std::setw(14) << e.logical_ops
          << std::setw(14) << fmt_ops_s(opss_busy)
          << std::setw(14) << fmt_ops_s(opss_span)
+         << std::setw(10) << e.enqueue_calls
          << "\n";
     };
 
@@ -247,12 +266,17 @@ class EngineModel {
        << std::setw(14) << "coeff_ops"
        << std::setw(14) << "op/s@busy"
        << std::setw(14) << "op/s@span"
+       << std::setw(10) << "enqueues"
        << "\n";
     os << "[MOAI_SIM_ENGINE] GB/s columns: byte engines use counted bytes; ntt/vec with bytes=0 use "
           "8B×coeff_ops (coeff-equiv) so GB/s aligns with op/s×8B.\n";
     row("dma", s.dma);
     row("ntt", s.ntt);
+    row("ntt_fwd", s.ntt_fwd);
+    row("ntt_inv", s.ntt_inv);
     row("vec", s.vec);
+    row("vec_bconv", s.vec_bconv);
+    row("vec_arith", s.vec_arith);
     row("onchip_xfer", s.onchip_xfer);
     row("ntt_rf_xfer", s.ntt_rf_xfer);
     row("vec_rf_xfer", s.vec_rf_xfer);
@@ -433,18 +457,38 @@ class EngineModel {
     return schedule(m_vec_rf_xfer, service, bytes, 0, dep_done_cycles);
   }
 
+  void bump_vec_lane(bool ks_bconv, uint64_t coeffs, uint64_t service, uint64_t finish) {
+    EngineStats &s = ks_bconv ? m_vec_bconv : m_vec_arith;
+    ++s.enqueue_calls;
+    s.logical_ops += coeffs;
+    s.busy_cycles += service;
+    s.last_finish_cycles = finish;
+  }
+
   // NTT: pipeline fill (see ntt_pipe_depth_cyc / auto log2(N)) + steady ceil(coeffs/lanes)*steady_cyc.
-  uint64_t enqueue_ntt_coeffs(uint64_t coeffs, uint64_t poly_degree, uint64_t dep_done_cycles = 0) {
+  // `ntt_inverse`: true = INTT (inverse) pass in this coarse model; false = forward NTT. Same `m_ntt` pipe for time.
+  uint64_t enqueue_ntt_coeffs(uint64_t coeffs, uint64_t poly_degree, uint64_t dep_done_cycles = 0,
+                              bool ntt_inverse = false) {
     const uint64_t service = ntt_service_cycles(coeffs, poly_degree);
-    return schedule(m_ntt, service, 0, coeffs, dep_done_cycles);
+    const uint64_t t_done = schedule(m_ntt, service, 0, coeffs, dep_done_cycles);
+    EngineStats &split = ntt_inverse ? m_ntt_inv : m_ntt_fwd;
+    ++split.enqueue_calls;
+    split.logical_ops += coeffs;
+    split.busy_cycles += service;
+    split.last_finish_cycles = t_done;
+    return t_done;
   }
 
   // Generic vec op (e.g. rescale/modswitch); uses vec_lanes like mul/add.
-  uint64_t enqueue_vec_coeffs(uint64_t coeffs, uint64_t cycles_per_coeff, uint64_t dep_done_cycles = 0) {
+  // `ks_keyswitch_bconv`: true only for Phantom CKKS keyswitch modup/moddown base-conv `enqueue_vec_coeffs` paths.
+  uint64_t enqueue_vec_coeffs(uint64_t coeffs, uint64_t cycles_per_coeff, uint64_t dep_done_cycles = 0,
+                              bool ks_keyswitch_bconv = false) {
     const uint64_t lanes = std::max<uint64_t>(1u, m_cfg.vec_lanes);
     const uint64_t waves = (coeffs + lanes - 1) / lanes;
     const uint64_t service = m_cfg.vec_pass_overhead_cyc + waves * cycles_per_coeff;
-    return schedule(m_vec, service, 0, coeffs, dep_done_cycles);
+    const uint64_t t_done = schedule(m_vec, service, 0, coeffs, dep_done_cycles);
+    bump_vec_lane(ks_keyswitch_bconv, coeffs, service, t_done);
+    return t_done;
   }
 
   uint64_t vec_mul_service_cycles(uint64_t coeffs) const {
@@ -456,7 +500,9 @@ class EngineModel {
 
   uint64_t enqueue_vec_mul(uint64_t coeffs, uint64_t dep_done_cycles = 0) {
     const uint64_t service = vec_mul_service_cycles(coeffs);
-    return schedule(m_vec, service, 0, coeffs, dep_done_cycles);
+    const uint64_t t_done = schedule(m_vec, service, 0, coeffs, dep_done_cycles);
+    bump_vec_lane(false, coeffs, service, t_done);
+    return t_done;
   }
 
   uint64_t enqueue_vec_add(uint64_t coeffs, uint64_t dep_done_cycles = 0) {
@@ -500,7 +546,7 @@ class EngineModel {
         if (!m_pt_const_resident && pt_chunk_bytes != 0)
         {
           t = stage_into_ntt_rf(pt_chunk_bytes, t, /*from_gspad=*/true);
-          t = enqueue_ntt_coeffs(c, poly_degree, t);
+          t = enqueue_ntt_coeffs(c, poly_degree, t, /*ntt_inverse=*/false);
           t = stage_into_vec_rf(pt_chunk_bytes, t, /*from_ntt_rf=*/true);
         }
         else if (m_pt_const_resident && pt_chunk_bytes != 0)
@@ -513,7 +559,7 @@ class EngineModel {
         t = enqueue_vec_mul(c, t);
 
         t = stage_into_ntt_rf(bytes_ct_chunk, t, /*from_gspad=*/false);
-        t = enqueue_ntt_coeffs(c, poly_degree, t);
+        t = enqueue_ntt_coeffs(c, poly_degree, t, /*ntt_inverse=*/true);
 
         // RF -> GlobalSPAD -> DMA writeback (chunk)
         t = enqueue_onchip_xfer(bytes_ct_chunk, t, OnchipRoute::NttRfToGspad);
@@ -525,9 +571,9 @@ class EngineModel {
     else
     {
       t = enqueue_dma_read(bytes_ct + bytes_pt, t);
-      t = enqueue_ntt_coeffs(coeffs, poly_degree, t);             // fwd
+      t = enqueue_ntt_coeffs(coeffs, poly_degree, t, false);       // fwd
       t = enqueue_vec_mul(coeffs, t);                              // mul
-      t = enqueue_ntt_coeffs(coeffs, poly_degree, t);             // inv
+      t = enqueue_ntt_coeffs(coeffs, poly_degree, t, true);       // inv
       t = enqueue_dma_write(bytes_ct, t);                         // write back ct
     }
     return t;
@@ -568,7 +614,7 @@ class EngineModel {
           t = enqueue_vec_mul(c, t);
 
         t = stage_into_ntt_rf(bytes_ct_chunk, t, /*from_gspad=*/false);
-        t = enqueue_ntt_coeffs(c, poly_degree, t);
+        t = enqueue_ntt_coeffs(c, poly_degree, t, true);
 
         t = enqueue_onchip_xfer(bytes_ct_chunk, t, OnchipRoute::NttRfToGspad);
         t = enqueue_dma_write(bytes_ct_chunk, t);
@@ -579,10 +625,10 @@ class EngineModel {
     else
     {
       t = enqueue_dma_read(2ULL * bytes_ct, t);
-      t = enqueue_ntt_coeffs(coeffs, poly_degree, t);
+      t = enqueue_ntt_coeffs(coeffs, poly_degree, t, false);
       for (uint64_t k = 0; k < K; ++k)
         t = enqueue_vec_mul(coeffs, t);
-      t = enqueue_ntt_coeffs(coeffs, poly_degree, t);
+      t = enqueue_ntt_coeffs(coeffs, poly_degree, t, true);
       t = enqueue_dma_write(bytes_ct, t);
     }
     return t;
@@ -662,6 +708,11 @@ class EngineModel {
     return t;
   }
 
+  // Hybrid KS op profiler: Phantom keyswitch core only (no DMA / Galois). Uses current env (MOAI_SIM_ALPHA, …).
+  uint64_t profile_keyswitch_phantom_ckks(uint64_t poly_degree, uint64_t limbs, uint64_t dep_done_cycles = 0) {
+    return enqueue_keyswitch_phantom_ckks(poly_degree, limbs, dep_done_cycles);
+  }
+
  private:
   EngineModel() = default;
 
@@ -735,23 +786,31 @@ class EngineModel {
   }
 
   // Digit count beta for RNS keyswitch (Phantom DRNSTool::modup uses v_base_part_Ql_to_compl_part_QlP_conv size).
+  // Phantom rns.cu: beta = ceil(|Ql|/alpha). Legacy: ceil(|Ql|/kswitch_size_p). MOAI_SIM_KSWITCH_BETA overrides.
   uint64_t keyswitch_beta_choose(uint64_t limbs) const {
-    const uint64_t P = std::max<uint64_t>(1ULL, m_cfg.kswitch_size_p);
     if (m_cfg.kswitch_beta > 0) return std::max<uint64_t>(1ULL, m_cfg.kswitch_beta);
-    return std::max<uint64_t>(1ULL, (limbs + P - 1) / P);
+    if (m_cfg.kswitch_beta_legacy) {
+      const uint64_t P = std::max<uint64_t>(1ULL, m_cfg.kswitch_size_p);
+      return std::max<uint64_t>(1ULL, (limbs + P - 1) / P);
+    }
+    const uint64_t alpha = std::max<uint64_t>(1ULL, m_cfg.kswitch_digit_alpha);
+    return std::max<uint64_t>(1ULL, (limbs + alpha - 1) / alpha);
   }
 
   // CKKS keyswitch core: INTT Ql (c2) -> modup (bconv + NTT QlP) × beta -> inner prod × beta ->
-  // moddown (INTT + bconv + fuse) × 2 -> add_to_ct × 2. Maps to NTT/VEC/onchip_misc engines only.
+  // moddown (INTT P-only + bconv + NTT Ql-only + fuse) × 2 -> add_to_ct × 2.
+  // Note: Phantom modup forward-NTT excludes the digit's part-Ql range because it was already NTT in input.
   uint64_t enqueue_keyswitch_phantom_ckks(uint64_t poly_degree, uint64_t limbs, uint64_t t) {
     const uint64_t coeffs_ql = poly_degree * limbs;
     const uint64_t num_P = std::max<uint64_t>(1ULL, m_cfg.kswitch_size_p);
     const uint64_t size_QlP = limbs + num_P;
     const uint64_t coeffs_qlp = poly_degree * size_QlP;
     const uint64_t beta = keyswitch_beta_choose(limbs);
+    const uint64_t alpha = std::max<uint64_t>(1ULL, m_cfg.kswitch_digit_alpha);
+    const uint64_t coeffs_p = poly_degree * num_P;
 
     // modup: INTT on c2 (CKKS alpha==1 path in phantom-fhe/src/rns_bconv.cu DRNSTool::modup)
-    t = enqueue_ntt_coeffs(coeffs_ql, poly_degree, t);
+    t = enqueue_ntt_coeffs(coeffs_ql, poly_degree, t, true);
 
     if (m_onchip.enabled() && coeffs_qlp != 0 && beta != 0) {
       const uint64_t scratch = coeffs_qlp * sizeof(uint64_t) * beta;
@@ -759,9 +818,12 @@ class EngineModel {
     }
 
     for (uint64_t bi = 0; bi < beta; ++bi) {
-      (void)bi;
-      t = enqueue_vec_coeffs(coeffs_qlp, m_cfg.kswitch_modup_bconv_cyc_per_coeff, t);
-      t = enqueue_ntt_coeffs(coeffs_qlp, poly_degree, t);
+      const uint64_t start = alpha * bi;
+      const uint64_t part_limbs = (start < limbs) ? std::min<uint64_t>(alpha, limbs - start) : 0ULL;
+      const uint64_t coeffs_excl_range = poly_degree * (size_QlP - part_limbs);
+      t = enqueue_vec_coeffs(coeffs_qlp, m_cfg.kswitch_modup_bconv_cyc_per_coeff, t, true);
+      // Phantom: forward NTT on QlP excluding [startPartIdx, endPartIdx) in Ql.
+      t = enqueue_ntt_coeffs(coeffs_excl_range, poly_degree, t, false);
     }
 
     for (uint64_t bi = 0; bi < beta; ++bi) {
@@ -771,8 +833,11 @@ class EngineModel {
 
     for (int part = 0; part < 2; ++part) {
       (void)part;
-      t = enqueue_ntt_coeffs(coeffs_qlp, poly_degree, t);
-      t = enqueue_vec_coeffs(coeffs_ql, m_cfg.kswitch_moddown_bconv_cyc_per_coeff, t);
+      // Phantom CKKS moddown_from_NTT: inverse-transform P only (Ql remains in NTT).
+      t = enqueue_ntt_coeffs(coeffs_p, poly_degree, t, true);
+      t = enqueue_vec_coeffs(coeffs_ql, m_cfg.kswitch_moddown_bconv_cyc_per_coeff, t, true);
+      // Phantom CKKS: nwt_2d_radix8_forward_inplace_fuse_moddown runs over Ql.
+      t = enqueue_ntt_coeffs(coeffs_ql, poly_degree, t, false);
       t = enqueue_vec_mul(coeffs_ql, t);
     }
 
@@ -856,6 +921,7 @@ class EngineModel {
                      uint64_t bytes,
                      uint64_t logical_ops,
                      uint64_t dep_done_cycles) {
+    ++e.enqueue_calls;
     const uint64_t start = std::max(e.last_finish_cycles, dep_done_cycles);
     const uint64_t finish = start + service_cycles;
     e.last_finish_cycles = finish;
@@ -868,7 +934,11 @@ class EngineModel {
 
   EngineStats m_dma{};
   EngineStats m_ntt{};
+  EngineStats m_ntt_fwd{};
+  EngineStats m_ntt_inv{};
   EngineStats m_vec{};
+  EngineStats m_vec_bconv{};
+  EngineStats m_vec_arith{};
   EngineStats m_onchip_xfer{};
   EngineStats m_ntt_rf_xfer{};
   EngineStats m_vec_rf_xfer{};

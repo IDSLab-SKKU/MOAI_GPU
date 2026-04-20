@@ -7,8 +7,10 @@ namespace moai {
 namespace sim {
 
 // Default CKKS shape for `single_layer_test()` (see `test/test_single_layer.cuh`).
-// Primitive-only sim (`test_sim_primitives.cuh`) uses the same N and |coeff_modulus| count by default
-// so coarse bytes/cycles match that recipe without setting MOAI_SIM_POLY_DEGREE / MOAI_SIM_NUM_LIMBS.
+// `kSingleLayerCoeffModulusCount()` is the **full** Phantom `coeff_modulus` prime count **|QP|**
+// (data Q + special P). Estimator primitives treat MOAI_SIM_NUM_LIMBS as |QP| by default and use
+// |Ql| = |QP| − MOAI_SIM_ALPHA for coarse ops (`sim_effective_rns_limbs_for_ct`); set
+// MOAI_SIM_NUM_LIMBS_COUNTS_QP=0 if MOAI_SIM_NUM_LIMBS is already |Ql|.
 //
 // coeff_bit_vec layout there: [logq] + logp * remaining_level + logq * boot_level + [log_special_prime]
 // => chain length = 1 + remaining_level + boot_level + 1.

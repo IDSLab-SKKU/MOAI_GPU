@@ -104,7 +104,9 @@ cmake --build build -j"$(nproc)" --target test
 | 변수 | 설명 |
 |------|------|
 | `MOAI_SIM_CT_CT_VEC_MUL_PASSES` | `enqueue_ct_ct_multiply` 안 vec_mul 반복 횟수(조악한 RNS/텐서 프록시). 기본 3. |
-| `MOAI_SIM_KSWITCH_SIZE_P`, `MOAI_SIM_KSWITCH_BETA` (0이면 auto), `MOAI_SIM_KSWITCH_MODUP_BCONV_CYC_PER_COEFF`, `MOAI_SIM_KSWITCH_MODDOWN_BCONV_CYC_PER_COEFF` | Phantom CKKS keyswitch coarse 모델 |
+| `MOAI_SIM_KSWITCH_SIZE_P` | QlP 확장 시 **\|P\|**(특수 소수 개수). `size_QlP = \|Ql\| + \|P\|` (β 산정과 별개). |
+| `MOAI_SIM_KSWITCH_BETA` | 수동 β. **`0`**이면 `MOAI_SIM_KSWITCH_BETA_MODE`에 따라 자동: **`phantom`(기본)** → `β = ⌈\|Ql\|/α⌉` (`MOAI_SIM_ALPHA`); **`legacy`** → `β = ⌈\|Ql\|/\|P\|⌉`(구버전). |
+| `MOAI_SIM_KSWITCH_MODUP_BCONV_CYC_PER_COEFF`, `MOAI_SIM_KSWITCH_MODDOWN_BCONV_CYC_PER_COEFF` | Phantom CKKS keyswitch coarse 모델의 BConv 단계 사이클 |
 | `MOAI_SIM_GALOIS_PERM_CYC_PER_COEFF` | Galois(회전) 전 perm 단계 |
 | `MOAI_SIM_GALOIS_KEY_BYTES`, `MOAI_SIM_RELIN_KEY_BYTES` | 키 DMA 바이트. **미설정 시** `MOAI_SIM_POLY_DEGREE`·`MOAI_SIM_NUM_LIMBS`·`MOAI_SIM_ALPHA`(기본 1)로 `dnum=(T-\alpha)/\alpha` 를 두고 **`dnum·2·T·N·8`** ( `keys_dnum_35` / `compute_key_bytes.py` 와 동일)을 relin·Galois 각각에 사용. **`0`으로 명시**하면 키 트래픽 끔. |
 | `MOAI_SIM_ALPHA` | 하이브리드 special modulus 크기(Phantom `MOAI_ALPHA` 와 맞춤). 기본 `1`. `T % alpha == 0` 등이 안 맞으면 자동 키 바이트는 0. |
@@ -157,9 +159,10 @@ NTT/vec 곱 등은 최근 경로에서 **`estimate_*` + `EngineModelConfig::from
 | 환경 변수 | 기본 | 의미 |
 |-----------|------|------|
 | `MOAI_SIM_POLY_DEGREE` | 65536 | \(N\) (poly modulus degree). 기본값은 `sim_ckks_defaults.h`의 `kSingleLayerPolyModulusDegree()` (= `single_layer_test` 의 `logN=16`). |
-| `MOAI_SIM_NUM_LIMBS` | 36 | **RNS limb 수 프록시** \(T\). 기본값은 같은 헤더의 `kSingleLayerCoeffModulusCount()` (= single_layer 기본 `coeff_bit_vec` 길이 1+20+14+1). |
+| `MOAI_SIM_NUM_LIMBS` | 36 | 기본은 **\|QP\|**(체인 전체 소수 개수, `kSingleLayerCoeffModulusCount()`). primitive·엔진은 **`MOAI_SIM_NUM_LIMBS_COUNTS_QP=1`(기본)** 일 때 암호문 **\|Ql\| = \|QP\| − `MOAI_SIM_ALPHA`** 로 변환(Phantom: α개가 특수 P, 나머지가 Q). |
+| `MOAI_SIM_NUM_LIMBS_COUNTS_QP` | `1` | `0`이면 `MOAI_SIM_NUM_LIMBS`를 이미 **\|Ql\|**로 본다(레거시). |
 
-개별 모듈러스 **비트 폭(예: 40비트×14 + 60비트)** 은 시뮬에 직접 들어가지 않는다. 바이트·사이클은 대략 **계수 개수 \(\propto N \times T\)** 로만 반영된다.
+개별 모듈러스 **비트 폭(예: 40비트×14 + 60비트)** 은 시뮬에 직접 들어가지 않는다. 바이트·사이클은 대략 **계수 개수 \(\propto N \times \|Ql\|\)** 로만 반영된다.
 
 ### 6.3 `ct_pt` / `ct_ct` estimator 블록
 
@@ -200,10 +203,34 @@ NTT/vec 곱 등은 최근 경로에서 **`estimate_*` + `EngineModelConfig::from
 | 변수 | 기본 | 의미 |
 |------|------|------|
 | `MOAI_SIM_POLY_DEGREE` | 65536 | \(N\) (`sim_ckks_defaults.h` / single_layer) |
-| `MOAI_SIM_NUM_LIMBS` | 36 | \(T\) = 기본 single_layer `|coeff_modulus|` |
+| `MOAI_SIM_NUM_LIMBS` | 36 | 기본 **\|QP\|**; 실제 primitive에 쓰는 \|Ql\|는 `MOAI_SIM_NUM_LIMBS_COUNTS_QP`·`MOAI_SIM_ALPHA`로 결정 |
+| `MOAI_SIM_ALPHA` | 1 | 하이브리드 digit / 특수 소수 개수(Phantom `special_modulus_size`와 맞춤). |
+| `MOAI_SIM_NUM_LIMBS_COUNTS_QP` | `1` | `0`이면 `MOAI_SIM_NUM_LIMBS` = \|Ql\| 직접. |
 | `MOAI_SIM_PRIMITIVE_LOOPS` | 1 | 같은 primitive 반복 횟수 |
 
 **주의:** `rotate` / `relin` / `modswitch`는 현재 **SimTiming 표에 전용 행이 없을 수 있어** 대부분의 coarse 카운터는 0에 가깝고, **`[MOAI_SIM_ENGINE]`** 블록이 실질적인 트래픽·makespan을 본다.
+
+### 7.3 하이브리드 키스위칭 연산량 프로파일 (GPU 없음)
+
+`MOAI_BENCH_MODE=sim_hybrid_ks_profile` — `keyswitch_op_profile.h`의 **`enqueue_keyswitch_phantom_ckks`와 동일 구조**로, α·\|Ql\|·β·dnum에 따른 **NTT/BConv/vec_mul 호출 수(및 가중 coeff 합)** 를 CSV로 내보낸다. 보안 λ는 없다. `plot_hybrid_ks_profile.py` 기본 **`--metric kernels`**이면 BConv(=modup+down)가 α와 함께 감소하는 추세를 보기 쉽다.
+
+- **해석(analytic) 열** (`ntt_kernels`, `bconv_*`, `vec_*`, `weighted_*`): `enqueue_keyswitch_phantom_ckks` 그래프를 **공식으로 복제**한 값.
+- **엔진 열** (`eng_ntt_enq`, `eng_vec_enq`): `MOAI_SIM_HYBRID_KS_MEASURE_ENGINE=1` 이고 **`MOAI_SIM_BACKEND=1`** 일 때 **`profile_keyswitch_phantom_ckks`** 한 번 실행 후 **`schedule()` 호출 횟수**(`enqueue_calls`). 해석 `ntt_kernels` 등과 맞춰 검산 가능. 측정 불가면 `-1`.
+- **엔진 coeff 합산** (`eng_ntt_coeff_ops`, `eng_vec_coeff_ops`): 위와 동일 실행에서 **`EngineStats::logical_ops`** — 각 패스에 넘긴 coeff 개수(\(N\times\)limbs)의 **합**. “모든 limb를 합산한” 시뮬레이터 측 작업량에 해당. 해석 `weighted_*`와는 정의가 다르니 비교 시 용도를 구분한다.
+- **메모리(바이트 추정)** (`mem_c2_bytes`, `mem_modup_buf_bytes`, `mem_cx_buf_bytes`, `mem_working_peak_bytes_est`): Phantom `eval_key_switch.cu` `keyswitch_inplace` 의 **`c2`**, **`t_mod_up`**(\(\beta\times\)|QlP|), **`cx`**(2×|QlP|) u64 버퍼 크기와, 동시 상주 가정 시 **합(`mem_working_peak_bytes_est`)**. `plot_hybrid_ks_profile.py --memory` 또는 `--all-plots` 로 `hybrid_ks_profile_memory.png` 생성.
+- **시뮬 사이클** (`eng_makespan_cyc`, `eng_ntt_busy_cyc`, `eng_ntt_fwd_busy_cyc`, `eng_ntt_inv_busy_cyc`, `eng_vec_busy_cyc`): 같은 `profile_keyswitch_phantom_ckks` 실행의 **`Summary::makespan_cycles`** 및 **`EngineStats::busy_cycles`**. 구조적 개수 대신 **모델 사이클**로 α 스윕 비교할 때 사용. `plot_hybrid_ks_profile.py --cycles-plots` → `hybrid_ks_profile_stacked_cycles.png`, `hybrid_ks_profile_engine_cycles.png`. 스택 합은 엔진별 일한 양의 합이며 **벽시계 makespan과 다를 수 있음**(겹침·크리티컬 패스).
+
+| 변수 | 기본 | 의미 |
+|------|------|------|
+| `MOAI_SIM_POLY_DEGREE`, `MOAI_SIM_NUM_LIMBS` | single_layer | \(N\), **\|QP\|** (`t_qp` 열; dnum·키 바이트 추정). |
+| `MOAI_SIM_KSWITCH_SIZE_Ql` | `0` → 각 행 **\|QP\|−α** | Phantom top-level **\|Q\|** 프록시. |
+| `MOAI_SIM_KSWITCH_SIZE_P` | **미설정 시 각 행 α** | QlP의 \|P\|; 명시 시 모든 행 동일. |
+| `MOAI_SIM_HYBRID_KS_ALPHA_LIST` | (비어 있으면 RANGE 또는 `MOAI_SIM_ALPHA`) | 쉼표로 구분된 α 목록 (예: `1,2,4,8`). 비어 있으면 RANGE 사용. |
+| `MOAI_SIM_HYBRID_KS_ALPHA_RANGE` | (미설정) | LIST가 비어 있을 때만 사용. **양 끝 포함** 범위 문자열 (예: `1-35` — α=35일 때 \|Q\|=1이면 β=1). |
+| `MOAI_SIM_HYBRID_KS_MEASURE_ENGINE` | `0` | `1`이면 CSV에 `eng_ntt_enq`, `eng_vec_enq`, `eng_*_coeff_ops` 기록(**`MOAI_SIM_BACKEND=1` 필요**). |
+| `MOAI_SIM_HYBRID_KS_EXACT_PARTITION` | `1` | `1`이면 **\|Ql\| ≥ α** 이고 **\|Ql\| mod α ≠ 0** 인 α만 스킵(완전한 digit 분할). **\|Ql\| < α** (예: β=1 한 덩어리)는 유지. `0`이면 Phantom `ceil(\|Ql\|/α)` 로 모든 α 유지. |
+| `MOAI_SIM_KSWITCH_BETA_MODE` | `phantom` | `legacy`면 β를 구버전 규칙으로 계산(프로파일만). |
+| `MOAI_SIM_HYBRID_KS_PROFILE_CSV` | `output/sim/hybrid_ks_profile.csv` | 출력 CSV 경로. |
 
 ---
 
@@ -217,6 +244,20 @@ MOAI_SIM_BACKEND=1 MOAI_BENCH_MODE=sim_mul_plain ./build/test
 
 # Primitive 전부 순차 리포트
 MOAI_SIM_BACKEND=1 MOAI_BENCH_MODE=sim_primitives ./build/test
+
+# 하이브리드 KS: α 스윕 연산량 CSV (해석만 — BACKEND 불필요)
+MOAI_TEST_OUTPUT_DISABLE=1 MOAI_BENCH_MODE=sim_hybrid_ks_profile \
+  MOAI_SIM_HYBRID_KS_ALPHA_RANGE=1-35 ./build/test
+
+# 동일 CSV에 엔진 schedule() 횟수(NTT/VEC enqueue)까지 — BACKEND 필수
+MOAI_TEST_OUTPUT_DISABLE=1 MOAI_SIM_BACKEND=1 MOAI_BENCH_MODE=sim_hybrid_ks_profile \
+  MOAI_SIM_HYBRID_KS_MEASURE_ENGINE=1 MOAI_SIM_HYBRID_KS_ALPHA_RANGE=1-35 ./build/test
+
+# 스택 막대 + 해석 vs eng_* 비교 PNG 한 번에
+python3 src/scripts/plot_hybrid_ks_profile.py --all-plots
+
+# 또는: CSV 재생성 + 두 PNG (엔진 측정·기본 exact_partition 포함)
+# src/scripts/run_hybrid_ks_sweep_plots.sh
 
 # 리포트 파일 지정, 콘솔 중복 출력 줄이기
 MOAI_SIM_BACKEND=1 MOAI_BENCH_MODE=sim_rescale \

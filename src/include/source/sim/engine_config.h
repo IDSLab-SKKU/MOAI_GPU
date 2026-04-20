@@ -40,6 +40,13 @@ inline uint64_t moai_sim_default_key_switch_bytes_per_use() {
   return dnum * 2ull * T * N * 8ull;
 }
 
+// Hybrid KS digit count for full modulus chain (Phantom / gen_moai_keys.cu): dnum = (T - alpha) / alpha.
+inline uint64_t hybrid_ks_dnum(uint64_t T_chain_primes, uint64_t alpha) {
+  if (alpha == 0 || T_chain_primes == 0 || T_chain_primes <= alpha) return 0;
+  if ((T_chain_primes - alpha) % alpha != 0) return 0;
+  return (T_chain_primes - alpha) / alpha;
+}
+
 // Optional positive float/double from env (MHz, GHz, etc.); returns false if unset/invalid.
 inline bool env_positive_double(const char *name, double *out) {
   const char *v = std::getenv(name);
@@ -55,6 +62,16 @@ inline bool env_bool(const char *name, bool def) {
   const char *v = std::getenv(name);
   if (!v || v[0] == '\0') return def;
   return std::strcmp(v, "0") != 0;
+}
+
+// Phantom-style: MOAI_SIM_NUM_LIMBS counts |QP| (full coeff_modulus prime count). Ciphertext RNS size |Ql| for
+// data at the top of the chain is |Q| = |QP| − |P|, and hybrid uses |P| = alpha (special_modulus_size).
+// MOAI_SIM_NUM_LIMBS_COUNTS_QP=0 → treat MOAI_SIM_NUM_LIMBS as |Ql| already (legacy sim).
+inline uint64_t sim_effective_rns_limbs_for_ct(uint64_t num_limbs_env, uint64_t alpha) {
+  const uint64_t a = std::max<uint64_t>(1ULL, alpha);
+  if (!env_bool("MOAI_SIM_NUM_LIMBS_COUNTS_QP", true)) return num_limbs_env;
+  if (num_limbs_env <= a) return num_limbs_env;
+  return num_limbs_env - a;
 }
 
 // floor(log2(x)) for x>=1; 0 for x<=1
@@ -223,8 +240,12 @@ struct EngineModelConfig {
   uint64_t ct_ct_vec_mul_passes = 3;
 
   // Keyswitch (Phantom eval_key_switch.cu keyswitch_inplace + rns_bconv DRNSTool::modup / moddown_from_NTT, CKKS).
-  // |P| = count of special moduli (typically 1). beta = digit count; 0 => ceil(|Ql|/|P|) with |Ql| = limbs.
+  // kswitch_size_p = |P| primes appended for QlP (size_QlP = |Ql| + |P|). NOT the hybrid digit size.
+  // Hybrid digit size = MOAI_SIM_ALPHA (kswitch_digit_alpha). beta = ceil(|Ql|/alpha) when MOAI_SIM_KSWITCH_BETA_MODE
+  // is unset/phantom; legacy uses ceil(|Ql|/kswitch_size_p). Override: MOAI_SIM_KSWITCH_BETA > 0.
   uint64_t kswitch_size_p = 1;
+  uint64_t kswitch_digit_alpha = 1;
+  bool kswitch_beta_legacy = false;
   uint64_t kswitch_beta = 0;
   uint64_t kswitch_modup_bconv_cyc_per_coeff = 1;
   uint64_t kswitch_moddown_bconv_cyc_per_coeff = 1;
@@ -268,7 +289,16 @@ struct EngineModelConfig {
     c.relin_key_bytes = env_u64("MOAI_SIM_RELIN_KEY_BYTES", moai_sim_default_key_switch_bytes_per_use());
     c.ct_ct_vec_mul_passes = env_u64("MOAI_SIM_CT_CT_VEC_MUL_PASSES", c.ct_ct_vec_mul_passes);
     c.ct_ct_vec_mul_passes = std::max<uint64_t>(1ULL, c.ct_ct_vec_mul_passes);
-    c.kswitch_size_p = std::max<uint64_t>(1ULL, env_u64("MOAI_SIM_KSWITCH_SIZE_P", c.kswitch_size_p));
+    c.kswitch_digit_alpha = std::max<uint64_t>(1ULL, env_u64("MOAI_SIM_ALPHA", c.kswitch_digit_alpha));
+    // Default |P| in QlP = alpha (Phantom special_modulus_size); set MOAI_SIM_KSWITCH_SIZE_P to override.
+    if (const char *ksp = std::getenv("MOAI_SIM_KSWITCH_SIZE_P"); ksp != nullptr && ksp[0] != '\0')
+      c.kswitch_size_p = std::max<uint64_t>(1ULL, env_u64("MOAI_SIM_KSWITCH_SIZE_P", 1));
+    else
+      c.kswitch_size_p = std::max<uint64_t>(1ULL, c.kswitch_digit_alpha);
+    if (const char *bm = std::getenv("MOAI_SIM_KSWITCH_BETA_MODE"); bm != nullptr && std::strcmp(bm, "legacy") == 0)
+      c.kswitch_beta_legacy = true;
+    else
+      c.kswitch_beta_legacy = false;
     c.kswitch_beta = env_u64("MOAI_SIM_KSWITCH_BETA", c.kswitch_beta);
     c.kswitch_modup_bconv_cyc_per_coeff =
         env_u64("MOAI_SIM_KSWITCH_MODUP_BCONV_CYC_PER_COEFF", c.kswitch_modup_bconv_cyc_per_coeff);

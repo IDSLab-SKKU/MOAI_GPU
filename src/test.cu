@@ -1,5 +1,6 @@
 #include "include.cuh"
 #include "source/sim/engine_config.h"
+#include "source/sim/keyswitch_op_profile.h"
 
 #include <cstdio>
 #include <cstring>
@@ -67,7 +68,8 @@ int main()
     //   sim_* primitives: one file per op — output/sim/primitive_<tag>.txt (see test_sim_primitives.cuh MOAI_SIM_REPORT_PATH).
     //   You must set MOAI_BENCH_MODE below; plain ./build/test does not run ct_pt.
     //   CT×CT knobs: MOAI_SIM_CT_CT_VEC_MUL_PASSES (default 3, coarse tensor/RNS proxy in enqueue_ct_ct_multiply).
-    //   Keyswitch (Phantom-aligned coarse): MOAI_SIM_KSWITCH_SIZE_P, MOAI_SIM_KSWITCH_BETA (0=auto ceil(|Ql|/|P|)),
+    //   Keyswitch (Phantom-aligned coarse): MOAI_SIM_KSWITCH_SIZE_P (|P| in QlP), MOAI_SIM_ALPHA (digit size),
+    //   MOAI_SIM_KSWITCH_BETA (0=auto: phantom ceil(|Ql|/alpha), or legacy via MOAI_SIM_KSWITCH_BETA_MODE=legacy),
     //   MOAI_SIM_KSWITCH_MODUP_BCONV_CYC_PER_COEFF, MOAI_SIM_KSWITCH_MODDOWN_BCONV_CYC_PER_COEFF, MOAI_SIM_GALOIS_PERM_CYC_PER_COEFF.
     //   Rotate/relin through Evaluator use EngineModel only when MOAI_SIM_GAP_POLICY=model; ct_ct estimator calls
     //   enqueue_rotate / enqueue_relinearize directly so engine sees relin/rotate traffic regardless.
@@ -84,6 +86,8 @@ int main()
     //   sim_add_inplace, sim_rescale, sim_rotate, sim_relin, sim_modswitch, sim_primitives (= all).
     //   N,T: MOAI_SIM_POLY_DEGREE, MOAI_SIM_NUM_LIMBS (defaults = single_layer: sim_ckks_defaults.h, N=65536 T=36);
     //   repeat: MOAI_SIM_PRIMITIVE_LOOPS (default 1).
+    //   Hybrid KS op profile (no GPU): MOAI_BENCH_MODE=sim_hybrid_ks_profile — CSV output/sim/hybrid_ks_profile.csv;
+    //   MOAI_SIM_HYBRID_KS_ALPHA_LIST=1,2,4,8 MOAI_SIM_KSWITCH_SIZE_Ql (default |Ql|=T), see keyswitch_op_profile.h.
     //   Stdout log: default output/test_logs/<MOAI_BENCH_MODE>.txt (or default.txt if unset). Override with
     //   MOAI_TEST_OUTPUT_PATH, disable with MOAI_TEST_OUTPUT_DISABLE=1, append with MOAI_TEST_OUTPUT_APPEND=1.
     //   rotate/relin/modswitch: SimTiming coarse rows stay 0; engine model carries traffic (keyswitch etc.).
@@ -175,6 +179,9 @@ int main()
             moai_sim_primitive_micro_bench("all");
             return 0;
         }
+        if (std::strcmp(bench, "sim_hybrid_ks_profile") == 0) {
+            return moai::sim::moai_sim_hybrid_ks_profile_run();
+        }
         if (std::strcmp(bench, "single_layer") == 0) {
             single_layer_test();
             return 0;
@@ -182,7 +189,7 @@ int main()
         std::cerr << "MOAI_BENCH_MODE='" << bench
                   << "' — use boot | bootstrap_micro | ct_pt | ct_pt_sanity | ct_pt_pre | ct_ct | softmax_micro | softmax | "
                      "softmax_boot | gelu | "
-                     "layernorm | single_layer | ct_pt_proj_compare | sim_primitive | sim_primitives | sim_mul_plain | sim_mul_ct | sim_add_inplace | "
+                     "layernorm | single_layer | ct_pt_proj_compare | sim_primitive | sim_primitives | sim_hybrid_ks_profile | sim_mul_plain | sim_mul_ct | sim_add_inplace | "
                      "sim_rescale | sim_rotate | sim_relin | sim_modswitch | "
                      "(unset for single_layer)\n";
         return 2;

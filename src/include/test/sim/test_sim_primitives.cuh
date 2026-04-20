@@ -2,6 +2,7 @@
 
 #include "include.cuh"
 
+#include "source/sim/engine_config.h"
 #include "source/sim/engine_model.h"
 #include "source/sim/sim_ckks_defaults.h"
 #include "source/sim/sim_timing.h"
@@ -99,8 +100,9 @@ inline void primitive_block(const char *tag, uint64_t N, uint64_t T, uint64_t lo
 }  // namespace sim_primitive_detail
 
 // Estimator-only: one homomorphic primitive (or "all") with SimTiming + optional EngineModel.
-// Requires MOAI_SIM_BACKEND=1. N,T from MOAI_SIM_POLY_DEGREE / MOAI_SIM_NUM_LIMBS; defaults match
-// `single_layer_test()` via `sim_ckks_defaults.h` (65536, |coeff_modulus|=36 for default recipe).
+// Requires MOAI_SIM_BACKEND=1. N from MOAI_SIM_POLY_DEGREE. MOAI_SIM_NUM_LIMBS defaults to |QP| (chain prime count);
+// effective ciphertext |Ql| = |QP|−MOAI_SIM_ALPHA when MOAI_SIM_NUM_LIMBS_COUNTS_QP=1 (Phantom hybrid default).
+// MOAI_SIM_NUM_LIMBS_COUNTS_QP=0 keeps legacy (T is already |Ql|). See engine_config.h sim_effective_rns_limbs_for_ct.
 // op: mul_plain | mul_ct | add_inplace | rescale | rotate | relin | modswitch | all
 inline void moai_sim_primitive_micro_bench(const char *op) {
   using ::moai::sim::EngineModel;
@@ -114,8 +116,10 @@ inline void moai_sim_primitive_micro_bench(const char *op) {
 
   const uint64_t N =
       SimTiming::env_u64("MOAI_SIM_POLY_DEGREE", ::moai::sim::kSingleLayerPolyModulusDegree());
-  const uint64_t T = SimTiming::env_u64("MOAI_SIM_NUM_LIMBS",
-                                        static_cast<uint64_t>(::moai::sim::kSingleLayerCoeffModulusCount()));
+  const uint64_t T_qp = SimTiming::env_u64(
+      "MOAI_SIM_NUM_LIMBS", static_cast<uint64_t>(::moai::sim::kSingleLayerCoeffModulusCount()));
+  const uint64_t alpha = std::max<uint64_t>(1ULL, SimTiming::env_u64("MOAI_SIM_ALPHA", 1));
+  const uint64_t T = ::moai::sim::sim_effective_rns_limbs_for_ct(T_qp, alpha);
   const uint64_t loops = SimTiming::env_u64("MOAI_SIM_PRIMITIVE_LOOPS", 1);
 
   const char *quiet_ev = std::getenv("MOAI_SIM_REPORT_QUIET");
@@ -130,6 +134,9 @@ inline void moai_sim_primitive_micro_bench(const char *op) {
   }
 #endif
   std::cout << "[MOAI_SIM_PRIMITIVE] per-primitive reports (see MOAI_SIM_REPORT_PATH rules in test_sim_primitives.cuh)\n";
+  if (T != T_qp)
+    std::cout << "[MOAI_SIM_PRIMITIVE] hybrid default: T_qp=" << T_qp << " alpha=" << alpha << " -> effective |Ql| T=" << T
+              << " (set MOAI_SIM_NUM_LIMBS_COUNTS_QP=0 for legacy T=T_qp)\n";
 
   auto run_mul_plain = [&]() {
     primitive_block(
