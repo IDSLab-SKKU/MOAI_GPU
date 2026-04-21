@@ -58,6 +58,17 @@ inline bool env_positive_double(const char *name, double *out) {
   return true;
 }
 
+// Optional non-negative float/double from env; returns false if unset/invalid.
+inline bool env_nonneg_double(const char *name, double *out) {
+  const char *v = std::getenv(name);
+  if (!v || v[0] == '\0' || !out) return false;
+  char *end = nullptr;
+  const double x = std::strtod(v, &end);
+  if (end == v || !std::isfinite(x) || x < 0.0) return false;
+  *out = x;
+  return true;
+}
+
 inline bool env_bool(const char *name, bool def) {
   const char *v = std::getenv(name);
   if (!v || v[0] == '\0') return def;
@@ -236,10 +247,33 @@ struct EngineModelConfig {
   uint64_t ntt_pass_overhead_cyc = 0;
   uint64_t vec_pass_overhead_cyc = 0;
 
+  // PRNG engine (on-the-fly random poly generation; e.g., SHAKE128+reject sampling).
+  // Modeled as a coefficient stream engine like NTT/VEC: ceil(coeffs/lanes)*cyc + overhead.
+  uint64_t prng_lanes = 8;
+  uint64_t prng_cyc_per_coeff = 1;
+  uint64_t prng_pass_overhead_cyc = 0;
+
+  // Detailed on-the-fly eval-key 'a' generator (SHAKE128 + reject sampling) timing knobs.
+  // These model buffering/backpressure/chunking beyond the simple prng_* stream model above.
+  uint64_t otf_evk_a_num_prng_lanes = 4;
+  uint64_t otf_evk_a_num_sampler_lanes = 4;
+  uint64_t otf_evk_a_shake_startup_cycles = 50;
+  uint64_t otf_evk_a_shake_block_cycles = 4;
+  uint64_t otf_evk_a_bit_fifo_capacity_blocks = 8;
+  uint64_t otf_evk_a_coeff_fifo_capacity = 256;
+  uint64_t otf_evk_a_chunk_size = 32;
+  uint64_t otf_evk_a_seed_metadata_bytes = 64;
+
   // Keys (bytes). `from_env()` sets from MOAI_SIM_GALOIS_KEY_BYTES / MOAI_SIM_RELIN_KEY_BYTES, or auto
   // `dnum * 2 * T * N * 8` (see `moai_sim_default_key_switch_bytes_per_use()`). Set env to 0 to omit key DMA.
   uint64_t galois_key_bytes = 0;
   uint64_t relin_key_bytes = 0;
+
+  // On-the-fly keyswitch key generation:
+  // Treat keyswitch key as (b,a), where a is a random poly generated on-chip. This reduces key DMA
+  // volume by scaling the key bytes read, and charges the PRNG engine for generating a in NTT domain.
+  bool otf_keygen = false;
+  double otf_keygen_key_bytes_scale = 0.5;  // default: halve key DMA (skip 'a' fetch)
 
   // CT×CT coarse model (enqueue_ct_ct_multiply): extra vec_mul waves per chunk — proxy for tensor/RNS
   // dyadic work before relinearize (separate Evaluator call). Default 3.
@@ -304,8 +338,41 @@ struct EngineModelConfig {
     c.modswitch_cyc_per_coeff = env_u64("MOAI_SIM_MODSWITCH_CYC_PER_COEFF", c.modswitch_cyc_per_coeff);
     c.ntt_pass_overhead_cyc = env_u64("MOAI_SIM_NTT_PASS_OVERHEAD_CYC", c.ntt_pass_overhead_cyc);
     c.vec_pass_overhead_cyc = env_u64("MOAI_SIM_VEC_PASS_OVERHEAD_CYC", c.vec_pass_overhead_cyc);
+
+    c.prng_lanes = std::max<uint64_t>(1ULL, env_u64("MOAI_SIM_PRNG_ENGINE_LANES", c.prng_lanes));
+    c.prng_cyc_per_coeff = std::max<uint64_t>(1ULL, env_u64("MOAI_SIM_PRNG_CYC_PER_COEFF", c.prng_cyc_per_coeff));
+    c.prng_pass_overhead_cyc = env_u64("MOAI_SIM_PRNG_PASS_OVERHEAD_CYC", c.prng_pass_overhead_cyc);
+
+    c.otf_evk_a_num_prng_lanes =
+        std::max<uint64_t>(1ULL, env_u64("MOAI_SIM_OTF_EVK_A_NUM_PRNG_LANES", c.otf_evk_a_num_prng_lanes));
+    c.otf_evk_a_num_sampler_lanes =
+        std::max<uint64_t>(1ULL, env_u64("MOAI_SIM_OTF_EVK_A_NUM_SAMPLER_LANES", c.otf_evk_a_num_sampler_lanes));
+    c.otf_evk_a_shake_startup_cycles =
+        env_u64("MOAI_SIM_OTF_EVK_A_SHAKE_STARTUP_CYCLES", c.otf_evk_a_shake_startup_cycles);
+    c.otf_evk_a_shake_block_cycles =
+        std::max<uint64_t>(1ULL, env_u64("MOAI_SIM_OTF_EVK_A_SHAKE_BLOCK_CYCLES", c.otf_evk_a_shake_block_cycles));
+    c.otf_evk_a_bit_fifo_capacity_blocks =
+        std::max<uint64_t>(1ULL, env_u64("MOAI_SIM_OTF_EVK_A_BIT_FIFO_CAPACITY_BLOCKS", c.otf_evk_a_bit_fifo_capacity_blocks));
+    c.otf_evk_a_coeff_fifo_capacity =
+        std::max<uint64_t>(1ULL, env_u64("MOAI_SIM_OTF_EVK_A_COEFF_FIFO_CAPACITY", c.otf_evk_a_coeff_fifo_capacity));
+    c.otf_evk_a_chunk_size =
+        std::max<uint64_t>(1ULL, env_u64("MOAI_SIM_OTF_EVK_A_CHUNK_SIZE", c.otf_evk_a_chunk_size));
+    c.otf_evk_a_seed_metadata_bytes =
+        env_u64("MOAI_SIM_OTF_EVK_A_SEED_METADATA_BYTES", c.otf_evk_a_seed_metadata_bytes);
+
     c.galois_key_bytes = env_u64("MOAI_SIM_GALOIS_KEY_BYTES", moai_sim_default_key_switch_bytes_per_use());
     c.relin_key_bytes = env_u64("MOAI_SIM_RELIN_KEY_BYTES", moai_sim_default_key_switch_bytes_per_use());
+
+    c.otf_keygen = env_bool("MOAI_SIM_OTF_KEYGEN", c.otf_keygen);
+    {
+      double scale = c.otf_keygen_key_bytes_scale;
+      if (env_nonneg_double("MOAI_SIM_OTF_KEYGEN_KEY_BYTES_SCALE", &scale)) {
+        // Clamp to [0,1] to avoid accidental amplification.
+        if (scale > 1.0) scale = 1.0;
+        c.otf_keygen_key_bytes_scale = scale;
+      }
+    }
+
     c.ct_ct_vec_mul_passes = env_u64("MOAI_SIM_CT_CT_VEC_MUL_PASSES", c.ct_ct_vec_mul_passes);
     c.ct_ct_vec_mul_passes = std::max<uint64_t>(1ULL, c.ct_ct_vec_mul_passes);
     c.kswitch_digit_alpha = std::max<uint64_t>(1ULL, env_u64("MOAI_SIM_ALPHA", c.kswitch_digit_alpha));

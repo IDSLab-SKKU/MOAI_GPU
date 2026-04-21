@@ -1,6 +1,7 @@
 #include "include.cuh"
 #include "source/sim/engine_config.h"
 #include "source/sim/keyswitch_op_profile.h"
+#include "test/sim/test_sim_prng_evalkey_a.cuh"
 
 #include <cstdio>
 #include <cstring>
@@ -182,6 +183,10 @@ int main()
         if (std::strcmp(bench, "sim_hybrid_ks_profile") == 0) {
             return moai::sim::moai_sim_hybrid_ks_profile_run();
         }
+        if (std::strcmp(bench, "sim_prng_evalkey_a") == 0) {
+            moai::sim::sim_prng_evalkey_a_microbench();
+            return 0;
+        }
         if (std::strcmp(bench, "single_layer") == 0) {
             single_layer_test();
             return 0;
@@ -191,6 +196,7 @@ int main()
                      "softmax_boot | gelu | "
                      "layernorm | single_layer | ct_pt_proj_compare | sim_primitive | sim_primitives | sim_hybrid_ks_profile | sim_mul_plain | sim_mul_ct | sim_add_inplace | "
                      "sim_rescale | sim_rotate | sim_relin | sim_modswitch | "
+                     "sim_prng_evalkey_a | "
                      "(unset for single_layer)\n";
         return 2;
     }

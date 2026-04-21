@@ -94,6 +94,7 @@ cmake --build build -j"$(nproc)" --target test
 | `MOAI_SIM_NTT_LANES`, `MOAI_SIM_NTT_PIPE_DEPTH_CYC`, `MOAI_SIM_NTT_STEADY_CYC_PER_COEFF` (별칭 `MOAI_SIM_NTT_CYC_PER_COEFF`) | NTT 파이프라인·레인 모델 |
 | `MOAI_SIM_VEC_LANES`, `MOAI_SIM_VEC_ADD_CYC_PER_COEFF` | 벡터 덧셈 등 |
 | `MOAI_SIM_VEC_MUL_STEADY_CYC_PER_COEFF` (별칭 `MOAI_SIM_VEC_MUL_CYC_PER_COEFF`, `MOAI_SIM_VEC_CYC_PER_COEFF`) | 벡터 곱 steady |
+| `MOAI_SIM_PRNG_ENGINE_LANES`, `MOAI_SIM_PRNG_CYC_PER_COEFF`, `MOAI_SIM_PRNG_PASS_OVERHEAD_CYC` | on-the-fly 랜덤 다항식 생성(PRNG) 엔진 처리량 모델(계수 스트림 기반) |
 | `MOAI_SIM_NTT_PASS_OVERHEAD_CYC`, `MOAI_SIM_VEC_PASS_OVERHEAD_CYC` | 패스 오버헤드 |
 | `MOAI_SIM_RESCALE_CYC_PER_COEFF`, `MOAI_SIM_MODSWITCH_CYC_PER_COEFF` | rescale / modswitch vec 단계 |
 
@@ -109,6 +110,8 @@ cmake --build build -j"$(nproc)" --target test
 | `MOAI_SIM_KSWITCH_MODUP_BCONV_CYC_PER_COEFF`, `MOAI_SIM_KSWITCH_MODDOWN_BCONV_CYC_PER_COEFF` | Phantom CKKS keyswitch coarse 모델의 BConv 단계 사이클 |
 | `MOAI_SIM_GALOIS_PERM_CYC_PER_COEFF` | Galois(회전) 전 perm 단계 |
 | `MOAI_SIM_GALOIS_KEY_BYTES`, `MOAI_SIM_RELIN_KEY_BYTES` | 키 DMA 바이트. **미설정 시** `MOAI_SIM_POLY_DEGREE`·`MOAI_SIM_NUM_LIMBS`·`MOAI_SIM_ALPHA`(기본 1)로 `dnum=(T-\alpha)/\alpha` 를 두고 **`dnum·2·T·N·8`** ( `keys_dnum_35` / `compute_key_bytes.py` 와 동일)을 relin·Galois 각각에 사용. **`0`으로 명시**하면 키 트래픽 끔. |
+| `MOAI_SIM_OTF_KEYGEN` | on-the-fly key generator 활성화. 키스위칭키를 (b,a)로 보고 **a는 랜덤 다항식**이므로 이를 온칩 PRNG로 생성한다고 가정해 key DMA 일부를 compute로 이전한다. |
+| `MOAI_SIM_OTF_KEYGEN_KEY_BYTES_SCALE` | `MOAI_SIM_OTF_KEYGEN=1`일 때 키 DMA 바이트 스케일(기본 0.5). 예: 0.5면 (b,a) 중 a를 생성해 **키 읽기 트래픽을 절반**으로 모델링. |
 | `MOAI_SIM_ALPHA` | 하이브리드 special modulus 크기(Phantom `MOAI_ALPHA` 와 맞춤). 기본 `1`. `T % alpha == 0` 등이 안 맞으면 자동 키 바이트는 0. |
 
 ### 4.4 On-chip (GlobalSPAD / RF)

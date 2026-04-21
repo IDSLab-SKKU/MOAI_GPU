@@ -11,6 +11,7 @@
 #include <string>
 
 #include "source/sim/engine_config.h"
+#include "source/sim/prng_evalkey_a.h"
 
 namespace moai {
 namespace sim {
@@ -45,6 +46,8 @@ class EngineModel {
     EngineStats ntt_fwd{};
     EngineStats ntt_inv{};
     EngineStats vec{};
+    // On-chip PRNG / random poly generation engine (e.g., SHAKE128+reject sampling).
+    EngineStats prng{};
     // Same physical VEC pipe as `vec`; keyswitch modup/moddown `enqueue_vec_coeffs` vs mul/add.
     EngineStats vec_bconv{};
     // All non–keyswitch-BConv vec work: vec_mul, vec_add, enqueue_vec_mac (MAC ops in `mac_ops`).
@@ -103,6 +106,7 @@ class EngineModel {
     m_ntt_fwd = {};
     m_ntt_inv = {};
     m_vec = {};
+    m_prng = {};
     m_vec_bconv = {};
     m_vec_arith = {};
     m_onchip_xfer = {};
@@ -151,6 +155,7 @@ class EngineModel {
     s.ntt_fwd = m_ntt_fwd;
     s.ntt_inv = m_ntt_inv;
     s.vec = m_vec;
+    s.prng = m_prng;
     s.vec_bconv = m_vec_bconv;
     s.vec_arith = m_vec_arith;
     s.onchip_xfer = m_onchip_xfer;
@@ -286,6 +291,7 @@ class EngineModel {
     row("ntt_fwd", s.ntt_fwd);
     row("ntt_inv", s.ntt_inv);
     row("vec", s.vec);
+    row("prng", s.prng);
     row("vec_bconv", s.vec_bconv);
     row("vec_arith", s.vec_arith);
     row("onchip_xfer", s.onchip_xfer);
@@ -506,6 +512,13 @@ class EngineModel {
     split.busy_cycles += service;
     split.last_finish_cycles = t_done;
     return t_done;
+  }
+
+  // PRNG / random poly generation: modeled as a coefficient stream engine (no bytes, only coeff_ops).
+  // Intended for on-the-fly generation of keyswitch key component 'a' in NTT domain.
+  uint64_t enqueue_prng_coeffs(uint64_t coeffs, uint64_t dep_done_cycles = 0) {
+    const uint64_t service = prng_service_cycles(coeffs);
+    return schedule(m_prng, service, 0, coeffs, dep_done_cycles);
   }
 
   // Generic vec op (e.g. rescale/modswitch); uses vec_lanes like mul/add.
@@ -750,9 +763,18 @@ class EngineModel {
     const uint64_t bytes_ct = ct_size * coeffs * sizeof(uint64_t);
     const uint64_t key_bytes = m_cfg.galois_key_bytes;
     uint64_t t = dep_done_cycles;
-    t = enqueue_dma_read(bytes_ct + key_bytes, t);
+    const uint64_t key_dma_bytes =
+        (m_cfg.otf_keygen ? static_cast<uint64_t>(std::llround(static_cast<double>(key_bytes) * m_cfg.otf_keygen_key_bytes_scale))
+                          : key_bytes);
+    const uint64_t t_dma = enqueue_dma_read(bytes_ct + key_dma_bytes, t);
+    uint64_t t_prng = 0;
+    if (m_cfg.otf_keygen) {
+      // Model generating 'a' (random poly) on-chip in NTT domain. 1st-order: one poly on Ql.
+      t_prng = enqueue_prng_coeffs(coeffs, t);
+    }
+    t = std::max(t_dma, t_prng);
     if (m_onchip.enabled())
-      t = enqueue_onchip_xfer(bytes_ct + key_bytes, t, OnchipRoute::Misc);
+      t = enqueue_onchip_xfer(bytes_ct + key_dma_bytes, t, OnchipRoute::Misc);
     // apply_galois_ntt on c0 then c1 + D2D staging (two polys × Ql)
     if (m_onchip.enabled())
       t = enqueue_onchip_xfer(2 * bytes_poly, t, OnchipRoute::Misc);
@@ -771,9 +793,17 @@ class EngineModel {
     (void)ct_size;  // API parity; relin always uses 3->2 polys at this level.
     uint64_t t = dep_done_cycles;
     const uint64_t bytes_in = 3 * bytes_poly;
-    t = enqueue_dma_read(bytes_in + key_bytes, t);
+    const uint64_t key_dma_bytes =
+        (m_cfg.otf_keygen ? static_cast<uint64_t>(std::llround(static_cast<double>(key_bytes) * m_cfg.otf_keygen_key_bytes_scale))
+                          : key_bytes);
+    const uint64_t t_dma = enqueue_dma_read(bytes_in + key_dma_bytes, t);
+    uint64_t t_prng = 0;
+    if (m_cfg.otf_keygen) {
+      t_prng = enqueue_prng_coeffs(coeffs, t);
+    }
+    t = std::max(t_dma, t_prng);
     if (m_onchip.enabled())
-      t = enqueue_onchip_xfer(bytes_in + key_bytes, t, OnchipRoute::Misc);
+      t = enqueue_onchip_xfer(bytes_in + key_dma_bytes, t, OnchipRoute::Misc);
     t = enqueue_keyswitch_phantom_ckks(poly_degree, limbs, t);
     t = enqueue_dma_write(2 * bytes_poly, t);
     return t;
@@ -817,6 +847,13 @@ class EngineModel {
     if (m_cfg.ntt_pipe_depth_cyc > 0) return m_cfg.ntt_pipe_depth_cyc;
     if (poly_degree >= 2) return floor_log2_u64(poly_degree);
     return 0;
+  }
+
+  uint64_t prng_service_cycles(uint64_t coeffs) const {
+    const uint64_t lanes = std::max<uint64_t>(1u, m_cfg.prng_lanes);
+    const uint64_t waves = (coeffs + lanes - 1) / lanes;
+    const uint64_t cyc = std::max<uint64_t>(1u, m_cfg.prng_cyc_per_coeff);
+    return m_cfg.prng_pass_overhead_cyc + waves * cyc;
   }
 
   uint64_t ntt_service_cycles(uint64_t coeffs, uint64_t poly_degree) const {
@@ -891,6 +928,25 @@ class EngineModel {
     const uint64_t alpha = std::max<uint64_t>(1ULL, m_cfg.kswitch_digit_alpha);
     const uint64_t coeffs_p = poly_degree * num_P;
 
+    // On-the-fly eval-key 'a' generation request can start early (overlap with modup/bconv/ntt).
+    // This models generating a directly in NTT domain and feeding it into the evk multiply stage.
+    if (m_cfg.otf_keygen) {
+      PrngTimingConfig pcfg;
+      pcfg.num_prng_lanes = m_cfg.otf_evk_a_num_prng_lanes;
+      pcfg.num_sampler_lanes = m_cfg.otf_evk_a_num_sampler_lanes;
+      pcfg.shake_startup_cycles = m_cfg.otf_evk_a_shake_startup_cycles;
+      pcfg.shake_block_cycles = m_cfg.otf_evk_a_shake_block_cycles;
+      pcfg.bit_fifo_capacity_blocks = m_cfg.otf_evk_a_bit_fifo_capacity_blocks;
+      pcfg.coeff_fifo_capacity = m_cfg.otf_evk_a_coeff_fifo_capacity;
+      pcfg.chunk_size = m_cfg.otf_evk_a_chunk_size;
+      pcfg.seed_metadata_bytes = m_cfg.otf_evk_a_seed_metadata_bytes;
+      m_otf_evk_a.reset(pcfg);
+
+      // Request for the evk-multiply stage: beta * QlP coeff stream + 2 * Ql stream (moddown mul).
+      const uint64_t need = beta * coeffs_qlp + 2ULL * coeffs_ql;
+      (void)m_otf_evk_a.request(t, need);
+    }
+
     // modup: INTT on c2 (CKKS alpha==1 path in phantom-fhe/src/rns_bconv.cu DRNSTool::modup)
     t = enqueue_ntt_coeffs(coeffs_ql, poly_degree, t, true);
 
@@ -923,6 +979,10 @@ class EngineModel {
 
     for (uint64_t bi = 0; bi < beta; ++bi) {
       (void)bi;
+      if (m_cfg.otf_keygen) {
+        // Gate evk multiply by a availability (consume QlP coeff stream).
+        t = m_otf_evk_a.consume(t, coeffs_qlp);
+      }
       t = enqueue_vec_mul(coeffs_qlp, t);
     }
 
@@ -946,6 +1006,10 @@ class EngineModel {
       }
       // Phantom CKKS: nwt_2d_radix8_forward_inplace_fuse_moddown runs over Ql.
       t = enqueue_ntt_coeffs(coeffs_ql, poly_degree, t, false);
+      if (m_cfg.otf_keygen) {
+        // Moddown multiply also consumes 'a' over Ql (rough).
+        t = m_otf_evk_a.consume(t, coeffs_ql);
+      }
       t = enqueue_vec_mul(coeffs_ql, t);
     }
 
@@ -1045,6 +1109,8 @@ class EngineModel {
   EngineStats m_ntt_fwd{};
   EngineStats m_ntt_inv{};
   EngineStats m_vec{};
+  EngineStats m_prng{};
+  PrngEvalKeyAGenerator m_otf_evk_a{};
   EngineStats m_vec_bconv{};
   EngineStats m_vec_arith{};
   EngineStats m_onchip_xfer{};
