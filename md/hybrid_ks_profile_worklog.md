@@ -176,6 +176,15 @@ python3 src/scripts/plot_hybrid_ks_profile.py --mod-sizes-txt --T 36 --bts 14 --
 python3 src/scripts/plot_hybrid_ks_profile.py --mod-sizes --T 36 --bts 14 --csv output/sim/hybrid_ks_profile.csv
 ```
 
+### (추가) Montgomery(MMUL/MADD) 기준 VEC cycles 추정 플롯
+
+final reduce는 MMUL/MADD 비용에 **흡수**된다고 가정하고, CSV의 `*_mmul_ops`/`*_madd_ops`로
+`cycles = mmul_ops * mmul_cyc + madd_ops * madd_cyc` 형태로 VEC 비용을 추정한다.
+
+```bash
+python3 src/scripts/plot_hybrid_ks_profile.py --montgomery-cycles --mmul-cyc 1.0 --madd-cyc 1.0 --csv output/sim/hybrid_ks_profile.csv
+```
+
 주요 출력물:
 - `output/sim/hybrid_ks_profile.csv`
 - `output/sim/hybrid_ks_profile_stacked.png`
@@ -186,6 +195,7 @@ python3 src/scripts/plot_hybrid_ks_profile.py --mod-sizes --T 36 --bts 14 --csv 
 - `output/sim/hybrid_ks_profile_memory.png`
 - `output/sim/hybrid_ks_profile_mod_sizes.txt` (α→GENERAL/BTS/SPECIAL 표)
 - `output/sim/hybrid_ks_profile_mod_sizes.png` (α→GENERAL/BTS/SPECIAL 스택 바)
+- `output/sim/hybrid_ks_profile_montgomery_cycles.png` (MMUL/MADD 기반 VEC cycles 추정)
 
 ---
 

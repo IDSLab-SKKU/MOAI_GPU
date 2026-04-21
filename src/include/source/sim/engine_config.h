@@ -223,8 +223,14 @@ struct EngineModelConfig {
   // Vector MUL (double-buffered assumption): fill latency is overlapped — model only steady
   // throughput: ceil(coeffs/vec_lanes) * steady_cyc_per_wave (+ pass overhead).
   uint64_t vec_mul_steady_cyc_per_coeff = 1;
+  // Vector fused multiply-add (MAC / FMA) on coeff streams — same wave shape as vec_mul.
+  uint64_t vec_mac_steady_cyc_per_coeff = 1;
   uint64_t rescale_cyc_per_coeff = 1;
   uint64_t modswitch_cyc_per_coeff = 1;
+  // Montgomery-style primitives (used when modeling BConv as MMUL/MADD matmul):
+  // These are *effective* per-op cycles for one lane. Lanes parallelize ops similarly to coeff streams.
+  uint64_t vec_mmul_cyc_per_op = 1;
+  uint64_t vec_madd_cyc_per_op = 1;
 
   // Per-pass overheads (to make chunking hurt realistically)
   uint64_t ntt_pass_overhead_cyc = 0;
@@ -249,6 +255,13 @@ struct EngineModelConfig {
   uint64_t kswitch_beta = 0;
   uint64_t kswitch_modup_bconv_cyc_per_coeff = 1;
   uint64_t kswitch_moddown_bconv_cyc_per_coeff = 1;
+  // If enabled, model keyswitch BConv time from MMUL/MADD ops (matmul), instead of per-coeff constant.
+  bool kswitch_bconv_use_montgomery_ops = false;
+  // If enabled (and Montgomery BConv above), schedule matmul/accumulate as FMA/MAC (one wave per MAC) plus
+  // extra MMUL-only waves when mmul_ops > madd_ops (BEHZ moddown phase1: mmul−madd = N·|P|).
+  bool kswitch_bconv_use_fma_ops = false;
+  // Cycles per fused MAC op on the vec lane (defaults to vec_mmul_cyc_per_op in from_env).
+  uint64_t vec_mac_cyc_per_op = 1;
   // apply_galois_ntt on c0 then c1 (evaluate.cu apply_galois_inplace, CKKS).
   uint64_t galois_perm_cyc_per_coeff = 1;
 
@@ -281,6 +294,12 @@ struct EngineModelConfig {
     c.vec_mul_steady_cyc_per_coeff = env_u64(
         "MOAI_SIM_VEC_MUL_STEADY_CYC_PER_COEFF",
         env_u64("MOAI_SIM_VEC_MUL_CYC_PER_COEFF", env_u64("MOAI_SIM_VEC_CYC_PER_COEFF", c.vec_mul_steady_cyc_per_coeff)));
+    c.vec_mac_steady_cyc_per_coeff = std::max<uint64_t>(
+        1ULL,
+        env_u64("MOAI_SIM_VEC_MAC_STEADY_CYC_PER_COEFF",
+                env_u64("MOAI_SIM_VEC_MAC_CYC_PER_COEFF", c.vec_mul_steady_cyc_per_coeff)));
+    c.vec_mmul_cyc_per_op = env_u64("MOAI_SIM_VEC_MMUL_CYC_PER_OP", c.vec_mmul_cyc_per_op);
+    c.vec_madd_cyc_per_op = env_u64("MOAI_SIM_VEC_MADD_CYC_PER_OP", c.vec_madd_cyc_per_op);
     c.rescale_cyc_per_coeff = env_u64("MOAI_SIM_RESCALE_CYC_PER_COEFF", c.rescale_cyc_per_coeff);
     c.modswitch_cyc_per_coeff = env_u64("MOAI_SIM_MODSWITCH_CYC_PER_COEFF", c.modswitch_cyc_per_coeff);
     c.ntt_pass_overhead_cyc = env_u64("MOAI_SIM_NTT_PASS_OVERHEAD_CYC", c.ntt_pass_overhead_cyc);
@@ -304,6 +323,11 @@ struct EngineModelConfig {
         env_u64("MOAI_SIM_KSWITCH_MODUP_BCONV_CYC_PER_COEFF", c.kswitch_modup_bconv_cyc_per_coeff);
     c.kswitch_moddown_bconv_cyc_per_coeff =
         env_u64("MOAI_SIM_KSWITCH_MODDOWN_BCONV_CYC_PER_COEFF", c.kswitch_moddown_bconv_cyc_per_coeff);
+    c.kswitch_bconv_use_montgomery_ops =
+        env_bool("MOAI_SIM_KSWITCH_BCONV_USE_MONTGOMERY_OPS", c.kswitch_bconv_use_montgomery_ops);
+    c.kswitch_bconv_use_fma_ops = env_bool("MOAI_SIM_KSWITCH_BCONV_USE_FMA_OPS", c.kswitch_bconv_use_fma_ops);
+    c.vec_mac_cyc_per_op =
+        std::max<uint64_t>(1ULL, env_u64("MOAI_SIM_VEC_MAC_CYC_PER_OP", c.vec_mmul_cyc_per_op));
     c.galois_perm_cyc_per_coeff = env_u64("MOAI_SIM_GALOIS_PERM_CYC_PER_COEFF", c.galois_perm_cyc_per_coeff);
     return c;
   }
@@ -337,6 +361,14 @@ inline double theoretical_vec_add_steady_coeff_equiv_gbps(const EngineModelConfi
   return coeffs_per_s * 8.0 / 1e9;
 }
 
+inline double theoretical_vec_mac_steady_coeff_equiv_gbps(const EngineModelConfig &cfg, double cycle_period_ns) {
+  if (!std::isfinite(cycle_period_ns) || cycle_period_ns <= 0.0) return 0.0;
+  const double lanes = static_cast<double>(std::max<uint64_t>(1ULL, cfg.vec_lanes));
+  const double steady = static_cast<double>(std::max<uint64_t>(1ULL, cfg.vec_mac_steady_cyc_per_coeff));
+  const double coeffs_per_s = (lanes / steady) / (cycle_period_ns * 1e-9);
+  return coeffs_per_s * 8.0 / 1e9;
+}
+
 // Same formulas as EngineModel ntt_service_cycles / vec lane waves (for SimTiming alignment).
 inline uint64_t estimate_ntt_cycles(uint64_t coeffs, uint64_t poly_degree) {
   const EngineModelConfig cfg = EngineModelConfig::from_env();
@@ -359,6 +391,13 @@ inline uint64_t estimate_vec_mul_cycles(uint64_t coeffs) {
   const uint64_t lanes = std::max<uint64_t>(1ULL, cfg.vec_lanes);
   const uint64_t waves = (coeffs + lanes - 1) / lanes;
   return cfg.vec_pass_overhead_cyc + waves * cfg.vec_mul_steady_cyc_per_coeff;
+}
+
+inline uint64_t estimate_vec_mac_cycles(uint64_t coeffs) {
+  const EngineModelConfig cfg = EngineModelConfig::from_env();
+  const uint64_t lanes = std::max<uint64_t>(1ULL, cfg.vec_lanes);
+  const uint64_t waves = (coeffs + lanes - 1) / lanes;
+  return cfg.vec_pass_overhead_cyc + waves * cfg.vec_mac_steady_cyc_per_coeff;
 }
 
 // Coarse CT×CT multiply (matches enqueue_ct_ct_multiply off-chip shape: NTT + K×vec + NTT).

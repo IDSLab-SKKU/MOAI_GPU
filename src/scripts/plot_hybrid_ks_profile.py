@@ -11,6 +11,11 @@ Engine schedule + coeff_ops:
 
 Stacked + engine compare + memory + **simulator cycles** + **donut %** (needs MEASURE_ENGINE CSV for cycle pie):
   python3 src/scripts/plot_hybrid_ks_profile.py --all-plots
+
+Montgomery VEC plot (`--montgomery-cycles`): engine `vec_arith` estimate adds
+`eng_vec_arith_mac_ops * mac_cyc` (default `mac_cyc` = `--mmul-cyc`).
+BConv (`vec_bconv`) default: FMA-style `madd*mac_c + max(0,mmul-madd)*mmul_c` (matches EngineModel KS BConv FMA).
+Use `--montgomery-bconv-split-mmadd` for legacy `mmul*mmul_c + madd*madd_c`.
 """
 from __future__ import annotations
 
@@ -105,6 +110,11 @@ def main() -> int:
         help="Y = EngineModel busy_cycles / makespan (not structural counts); needs eng_*_busy_cyc columns",
     )
     ap.add_argument(
+        "--ntt-cycles",
+        action="store_true",
+        help="Plot NTT busy_cycles (total/fwd/inv) vs α; needs eng_ntt_*_busy_cyc columns",
+    )
+    ap.add_argument(
         "--out-cycles-stacked",
         type=Path,
         default=Path("output/sim/hybrid_ks_profile_stacked_cycles.png"),
@@ -117,6 +127,12 @@ def main() -> int:
         help="Lines: makespan + per-engine busy_cycles vs alpha",
     )
     ap.add_argument(
+        "--out-ntt-cycles",
+        type=Path,
+        default=Path("output/sim/hybrid_ks_profile_ntt_cycles.png"),
+        help="Output path for --ntt-cycles",
+    )
+    ap.add_argument(
         "--pie",
         action="store_true",
         help="Donut chart(s): % share of workload (sum over CSV rows); optional engine busy split",
@@ -126,6 +142,40 @@ def main() -> int:
         type=Path,
         default=Path("output/sim/hybrid_ks_profile_pie.png"),
         help="Output path for --pie (structural + optional simulator busy_cycles)",
+    )
+    ap.add_argument(
+        "--montgomery-cycles",
+        action="store_true",
+        help="Plot VEC-cycle estimate using Montgomery MMUL/MADD op counts from CSV (final reduce absorbed)",
+    )
+    ap.add_argument(
+        "--mmul-cyc",
+        type=float,
+        default=1.0,
+        help="Cycles per modular multiply (effective; include lanes/throughput in this number)",
+    )
+    ap.add_argument(
+        "--madd-cyc",
+        type=float,
+        default=1.0,
+        help="Cycles per modular add (effective; include lanes/throughput in this number)",
+    )
+    ap.add_argument(
+        "--mac-cyc",
+        type=float,
+        default=None,
+        help="Cycles per fused MAC op for eng_vec_arith_mac_ops (default: same as --mmul-cyc)",
+    )
+    ap.add_argument(
+        "--montgomery-bconv-split-mmadd",
+        action="store_true",
+        help="BConv only: estimate cycles as MMUL+MADD separately. Default: FMA (MAC + extra MMUL when mmul>madd).",
+    )
+    ap.add_argument(
+        "--out-montgomery-cycles",
+        type=Path,
+        default=Path("output/sim/hybrid_ks_profile_montgomery_cycles.png"),
+        help="Output path for --montgomery-cycles",
     )
     ap.add_argument(
         "--mod-sizes",
@@ -171,9 +221,11 @@ def main() -> int:
         args.compare_engine = True
         args.memory = True
         args.cycles_plots = True
+        args.ntt_cycles = True
         args.pie = True
         args.mod_sizes = True
         args.mod_sizes_txt = True
+        args.montgomery_cycles = True
 
     if not args.csv.is_file():
         raise SystemExit(f"missing {args.csv} (run sim_hybrid_ks_profile first)")
@@ -283,6 +335,30 @@ def main() -> int:
     fig.tight_layout()
     fig.savefig(args.out, dpi=150)
     print(f"wrote {args.out}")
+
+    if args.ntt_cycles:
+        need = ["eng_ntt_busy_cyc", "eng_ntt_fwd_busy_cyc", "eng_ntt_inv_busy_cyc"]
+        missing = [c for c in need if c not in rows[0]]
+        if missing:
+            print(f"missing columns for --ntt-cycles: {missing} (re-run sim_hybrid_ks_profile with MEASURE_ENGINE enabled)")
+        else:
+            n_tot = [float(r.get("eng_ntt_busy_cyc", 0) or 0) for r in rows]
+            n_fwd = [float(r.get("eng_ntt_fwd_busy_cyc", 0) or 0) for r in rows]
+            n_inv = [float(r.get("eng_ntt_inv_busy_cyc", 0) or 0) for r in rows]
+
+            fig_n, ax_n = plt.subplots(figsize=(9, 4.6))
+            ax_n.plot(alphas, n_tot, "o-", label="NTT busy (total)")
+            ax_n.plot(alphas, n_fwd, "s-", label="NTT fwd busy")
+            ax_n.plot(alphas, n_inv, "^-", label="INTT busy")
+            ax_n.set_xlabel(r"$\alpha$")
+            ax_n.set_ylabel("cycles")
+            ax_n.set_title("Hybrid KS — NTT busy_cycles vs α (engine model)")
+            ax_n.grid(True, alpha=0.25)
+            ax_n.legend(loc="best", fontsize=9)
+            fig_n.tight_layout()
+            args.out_ntt_cycles.parent.mkdir(parents=True, exist_ok=True)
+            fig_n.savefig(args.out_ntt_cycles, dpi=150)
+            print(f"wrote {args.out_ntt_cycles}")
 
     if args.mod_sizes or args.mod_sizes_txt:
         T = int(args.T)
@@ -426,6 +502,113 @@ def main() -> int:
         args.out_pie.parent.mkdir(parents=True, exist_ok=True)
         fig_p.savefig(args.out_pie, dpi=150, bbox_inches="tight")
         print(f"wrote {args.out_pie}")
+
+    if args.montgomery_cycles:
+        need_cols = [
+            "bconv_mmul_ops",
+            "bconv_madd_ops",
+            "vec_mul_mmul_ops",
+            "vec_add_madd_ops",
+        ]
+        missing = [c for c in need_cols if c not in rows[0]]
+        if missing:
+            print(f"missing columns for --montgomery-cycles: {missing} (re-run sim_hybrid_ks_profile with updated build)")
+        else:
+            aa = [float(r["alpha"]) for r in rows]
+            mmul_c = float(args.mmul_cyc)
+            madd_c = float(args.madd_cyc)
+            mac_c = float(args.mac_cyc) if args.mac_cyc is not None else mmul_c
+            bconv_fma = not bool(args.montgomery_bconv_split_mmadd)
+
+            def cyc(mmul_ops: list[float], madd_ops: list[float]) -> list[float]:
+                return [mmul_ops[i] * mmul_c + madd_ops[i] * madd_c for i in range(len(mmul_ops))]
+
+            def bconv_cycle_est(mmul_ops: list[float], madd_ops: list[float]) -> list[float]:
+                # Aligns with engine_model.h vec_bconv_montgomery_service_cycles (lane-free scalar proxy).
+                if bconv_fma:
+                    return [
+                        madd_ops[i] * mac_c + max(0.0, mmul_ops[i] - madd_ops[i]) * mmul_c
+                        for i in range(len(mmul_ops))
+                    ]
+                return cyc(mmul_ops, madd_ops)
+
+            b_mmul_a = [float(r["bconv_mmul_ops"]) for r in rows]
+            b_madd_a = [float(r["bconv_madd_ops"]) for r in rows]
+            has_split = "bconv_modup_mmul_ops" in rows[0]
+            if has_split:
+                up_mmul_a = [float(r["bconv_modup_mmul_ops"]) for r in rows]
+                up_madd_a = [float(r["bconv_modup_madd_ops"]) for r in rows]
+                dn_mmul_a = [float(r["bconv_moddown_mmul_ops"]) for r in rows]
+                dn_madd_a = [float(r["bconv_moddown_madd_ops"]) for r in rows]
+                up_cyc_a = bconv_cycle_est(up_mmul_a, up_madd_a)
+                dn_cyc_a = bconv_cycle_est(dn_mmul_a, dn_madd_a)
+            else:
+                up_cyc_a = []
+                dn_cyc_a = []
+            a_mmul_a = [float(r["vec_mul_mmul_ops"]) for r in rows]
+            a_madd_a = [float(r["vec_add_madd_ops"]) for r in rows]
+            bcyc_a = bconv_cycle_est(b_mmul_a, b_madd_a)
+            acyc_a = cyc(a_mmul_a, a_madd_a)
+            total_a = [bcyc_a[i] + acyc_a[i] for i in range(len(rows))]
+
+            has_eng_ops = "eng_vec_bconv_mmul_ops" in rows[0] and any(
+                int(float(r.get("eng_vec_bconv_mmul_ops", -1) or -1)) >= 0 for r in rows
+            )
+            has_eng_arith_mac = "eng_vec_arith_mac_ops" in rows[0]
+            a_mac_e: list[float] = []
+            if has_eng_ops:
+                b_mmul_e = [float(r["eng_vec_bconv_mmul_ops"]) for r in rows]
+                b_madd_e = [float(r["eng_vec_bconv_madd_ops"]) for r in rows]
+                a_mmul_e = [float(r["eng_vec_arith_mmul_ops"]) for r in rows]
+                a_madd_e = [float(r["eng_vec_arith_madd_ops"]) for r in rows]
+                a_mac_e = [float(r.get("eng_vec_arith_mac_ops", 0) or 0) for r in rows] if has_eng_arith_mac else [0.0] * len(rows)
+                bcyc_e = bconv_cycle_est(b_mmul_e, b_madd_e)
+                acyc_e = [
+                    a_mmul_e[i] * mmul_c + a_madd_e[i] * madd_c + a_mac_e[i] * mac_c for i in range(len(rows))
+                ]
+                total_e = [bcyc_e[i] + acyc_e[i] for i in range(len(rows))]
+            else:
+                bcyc_e = []
+                acyc_e = []
+                total_e = []
+
+            bconv_lbl = "BConv FMA est (mac+extra×mmul)" if bconv_fma else "BConv MMUL+MADD est"
+            fig_m, (axm1, axm2) = plt.subplots(1, 2, figsize=(12, 4.3))
+            axm1.plot(aa, bcyc_a, "o-", label=f"analytic vec_bconv total ({bconv_lbl})")
+            if has_split:
+                axm1.plot(aa, up_cyc_a, "^-", alpha=0.85, label=f"analytic modup ({bconv_lbl})")
+                axm1.plot(aa, dn_cyc_a, "v-", alpha=0.85, label=f"analytic moddown×2 ({bconv_lbl})")
+            if has_eng_ops:
+                axm1.plot(aa, bcyc_e, "s--", label=f"engine vec_bconv ({bconv_lbl})")
+            axm1.set_xlabel(r"$\alpha$")
+            axm1.set_ylabel("estimated cycles")
+            axm1.set_title("BConv (vec_bconv)")
+            axm1.legend(fontsize=8)
+
+            axm2.plot(aa, total_a, "o-", label="analytic total VEC (bconv+arith; arith=mul+madd ops only)")
+            axm2.plot(aa, acyc_a, "^-", alpha=0.9, label="analytic vec_arith (mul+madd)")
+            if has_eng_ops:
+                axm2.plot(aa, total_e, "s--", label="engine total VEC (bconv+arith incl. MAC ops)")
+                lbl_arith = (
+                    "engine vec_arith (mmul+madd+mac)"
+                    if has_eng_arith_mac and a_mac_e and sum(a_mac_e) > 0
+                    else "engine vec_arith (mmul+madd)"
+                )
+                axm2.plot(aa, acyc_e, "v--", alpha=0.9, label=lbl_arith)
+            axm2.set_xlabel(r"$\alpha$")
+            axm2.set_ylabel("estimated cycles")
+            axm2.set_title("VEC total vs arith")
+            axm2.legend(fontsize=8)
+
+            bconv_mode = "BConv=FMA" if bconv_fma else "BConv=MMUL+MADD"
+            fig_m.suptitle(
+                f"Montgomery VEC estimate — {bconv_mode}; mmul={mmul_c:g}, madd={madd_c:g}, mac={mac_c:g} cyc/op",
+                fontsize=11,
+            )
+            fig_m.tight_layout()
+            args.out_montgomery_cycles.parent.mkdir(parents=True, exist_ok=True)
+            fig_m.savefig(args.out_montgomery_cycles, dpi=150)
+            print(f"wrote {args.out_montgomery_cycles}")
 
     if args.compare_engine and "eng_ntt_enq" in rows[0]:
         has_eng = any(int(float(r.get("eng_ntt_enq", -1) or -1)) >= 0 for r in rows)
@@ -583,15 +766,30 @@ def main() -> int:
             if has_vec_cyc_split:
                 ax_c1.bar(xc, vbconv, w, bottom=b12c, label="VEC BConv busy_cycles")
                 b123c = [b12c[i] + vbconv[i] for i in range(len(xc))]
-                ax_c1.bar(xc, varith, w, bottom=b123c, label="VEC arith busy_cycles")
+                ax_c1.bar(
+                    xc,
+                    varith,
+                    w,
+                    bottom=b123c,
+                    label="VEC arith busy_cycles (mul/add/MAC; non-BConv)",
+                )
             else:
                 ax_c1.bar(xc, vb, w, bottom=b12c, label="VEC busy_cycles (bconv+mul+add)")
+            # Sanity: bconv + arith = eng_vec (arith includes enqueue_vec_mac).
+            for i in range(len(rows)):
+                ssplit = vbconv[i] + varith[i]
+                if abs(ssplit - vb[i]) > 0.5:
+                    print(
+                        f"warning: row α={aa_c[i]} eng_vec_bconv+arith={ssplit:g} "
+                        f"!= eng_vec_busy_cyc={vb[i]:g} (CSV column misalignment?)"
+                    )
             ax_c1.set_xticks(xc)
             ax_c1.set_xticklabels([str(int(a)) if a == int(a) else str(a) for a in aa_c])
             ax_c1.set_xlabel(r"$\alpha$")
             ax_c1.set_ylabel("Simulated cycles (EngineStats.busy_cycles)")
             ax_c1.set_title(
-                "Hybrid KS — per-engine busy (sum stacks work; overlap ⇒ ≠ wall time)"
+                "Hybrid KS — per-engine busy (sum stacks work; overlap ⇒ ≠ wall time)\n"
+                "VEC arith = all non–BConv vec (mul/add/MAC); BConv FMA/Montgomery stays in VEC BConv"
             )
             ax_c1.legend(loc="upper right", fontsize=8)
             fig_c1.tight_layout()
@@ -606,7 +804,7 @@ def main() -> int:
             ax_c2.plot(aa_c, ni_b, "^--", alpha=0.85, label="ntt_inv busy")
             if has_vec_cyc_split:
                 ax_c2.plot(aa_c, vbconv, "D-", label="vec_bconv busy_cycles")
-                ax_c2.plot(aa_c, varith, "v-", label="vec_arith busy_cycles")
+                ax_c2.plot(aa_c, varith, "v-", label="vec_arith (incl. MAC)")
                 ax_c2.plot(aa_c, vb, ":", alpha=0.6, label="vec total (check)")
             else:
                 ax_c2.plot(aa_c, vb, "D-", label="vec busy_cycles")

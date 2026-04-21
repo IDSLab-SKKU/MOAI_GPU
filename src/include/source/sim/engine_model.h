@@ -27,6 +27,11 @@ class EngineModel {
     uint64_t bytes = 0;
     // NTT/VEC: coefficient-elements (poly_degree * limbs scale) attributed per enqueue_* call.
     uint64_t logical_ops = 0;
+    // Optional VEC op breakdown (Montgomery model; final reduction absorbed):
+    uint64_t mmul_ops = 0;
+    uint64_t madd_ops = 0;
+    // Fused multiply-add (MAC / FMA) ops — `enqueue_vec_mac` coeff stream.
+    uint64_t mac_ops = 0;
     uint64_t last_finish_cycles = 0;
     // schedule() invocations for this engine (DMA / NTT / vec / xfer buckets).
     uint64_t enqueue_calls = 0;
@@ -42,6 +47,7 @@ class EngineModel {
     EngineStats vec{};
     // Same physical VEC pipe as `vec`; keyswitch modup/moddown `enqueue_vec_coeffs` vs mul/add.
     EngineStats vec_bconv{};
+    // All non–keyswitch-BConv vec work: vec_mul, vec_add, enqueue_vec_mac (MAC ops in `mac_ops`).
     EngineStats vec_arith{};
 
     // On-chip transfer + capacity accounting (rough)
@@ -216,11 +222,15 @@ class EngineModel {
        << " vec_lanes=" << m_cfg.vec_lanes
        << " vec_add_cyc=" << m_cfg.vec_add_cyc_per_coeff
        << " vec_mul_steady_cyc(db)=" << m_cfg.vec_mul_steady_cyc_per_coeff
+       << " vec_mac_steady_cyc(db)=" << m_cfg.vec_mac_steady_cyc_per_coeff
        << " kswitch_P=" << m_cfg.kswitch_size_p << " ks_alpha=" << m_cfg.kswitch_digit_alpha
        << " ks_beta_mode=" << (m_cfg.kswitch_beta_legacy ? "legacy" : "phantom")
        << " kswitch_beta_env=" << m_cfg.kswitch_beta
        << " ks_modup_bconv_cyc=" << m_cfg.kswitch_modup_bconv_cyc_per_coeff
        << " ks_moddown_bconv_cyc=" << m_cfg.kswitch_moddown_bconv_cyc_per_coeff
+       << " ks_bconv_montgomery_ops=" << (m_cfg.kswitch_bconv_use_montgomery_ops ? 1 : 0)
+       << " ks_bconv_fma_ops=" << (m_cfg.kswitch_bconv_use_fma_ops ? 1 : 0)
+       << " vec_mac_cyc_per_op=" << m_cfg.vec_mac_cyc_per_op
        << " galois_perm_cyc=" << m_cfg.galois_perm_cyc_per_coeff
        << " keyswitch_model=phantom_ckks_coarse"
        << " coeff_ops=NTT/VEC logical coeff-elements/op (op/s columns)"
@@ -229,9 +239,10 @@ class EngineModel {
     const double ntt_steady_peak_gbps = theoretical_ntt_steady_coeff_equiv_gbps(m_cfg, period);
     const double vec_mul_peak_gbps = theoretical_vec_mul_steady_coeff_equiv_gbps(m_cfg, period);
     const double vec_add_peak_gbps = theoretical_vec_add_steady_coeff_equiv_gbps(m_cfg, period);
+    const double vec_mac_peak_gbps = theoretical_vec_mac_steady_coeff_equiv_gbps(m_cfg, period);
     os << "[MOAI_SIM_ENGINE] steady_peak_coeff_equiv_GB/s (ideal lanes/steady, 8B/coeff; no fill/overhead): "
        << "ntt=" << fmt_gbps(ntt_steady_peak_gbps) << " vec_mul=" << fmt_gbps(vec_mul_peak_gbps)
-       << " vec_add=" << fmt_gbps(vec_add_peak_gbps)
+       << " vec_add=" << fmt_gbps(vec_add_peak_gbps) << " vec_mac=" << fmt_gbps(vec_mac_peak_gbps)
        << " | onchip_RF_cfg_peak_GB/s ntt_rf_eff=" << static_cast<double>(ntt_rf_eff_bw)
        << " vec_rf_eff=" << static_cast<double>(vec_rf_eff_bw) << " (bw×banks)\n";
 
@@ -457,10 +468,28 @@ class EngineModel {
     return schedule(m_vec_rf_xfer, service, bytes, 0, dep_done_cycles);
   }
 
-  void bump_vec_lane(bool ks_bconv, uint64_t coeffs, uint64_t service, uint64_t finish) {
-    EngineStats &s = ks_bconv ? m_vec_bconv : m_vec_arith;
+  // VEC pipe accounting: same `m_vec` schedule(), split into BConv-only vs all other vec (arith+MAC).
+  enum class VecSplit : uint8_t {
+    Arith,  // vec_mul, vec_add, enqueue_vec_mac, generic enqueue_vec_coeffs (non-keyswitch-bconv)
+    BConv,  // keyswitch modup/moddown base conversion only
+    Mac,    // enqueue_vec_mac — fused MAC; stats fold into `m_vec_arith` (mac_ops += coeffs)
+  };
+
+  void bump_vec_lane(VecSplit split,
+                     uint64_t coeffs,
+                     uint64_t service,
+                     uint64_t finish,
+                     uint64_t mmul_ops = 0,
+                     uint64_t madd_ops = 0) {
+    EngineStats &s = (split == VecSplit::BConv) ? m_vec_bconv : m_vec_arith;
     ++s.enqueue_calls;
     s.logical_ops += coeffs;
+    if (split == VecSplit::Mac)
+      s.mac_ops += coeffs;
+    else {
+      s.mmul_ops += mmul_ops;
+      s.madd_ops += madd_ops;
+    }
     s.busy_cycles += service;
     s.last_finish_cycles = finish;
   }
@@ -487,7 +516,43 @@ class EngineModel {
     const uint64_t waves = (coeffs + lanes - 1) / lanes;
     const uint64_t service = m_cfg.vec_pass_overhead_cyc + waves * cycles_per_coeff;
     const uint64_t t_done = schedule(m_vec, service, 0, coeffs, dep_done_cycles);
-    bump_vec_lane(ks_keyswitch_bconv, coeffs, service, t_done);
+    bump_vec_lane(ks_keyswitch_bconv ? VecSplit::BConv : VecSplit::Arith, coeffs, service, t_done);
+    return t_done;
+  }
+
+  uint64_t vec_montgomery_ops_service_cycles(uint64_t mmul_ops, uint64_t madd_ops) const {
+    const uint64_t lanes = std::max<uint64_t>(1u, m_cfg.vec_lanes);
+    const uint64_t mmul_waves = (mmul_ops + lanes - 1) / lanes;
+    const uint64_t madd_waves = (madd_ops + lanes - 1) / lanes;
+    const uint64_t mmul_cyc = std::max<uint64_t>(1u, m_cfg.vec_mmul_cyc_per_op);
+    const uint64_t madd_cyc = std::max<uint64_t>(1u, m_cfg.vec_madd_cyc_per_op);
+    return m_cfg.vec_pass_overhead_cyc + mmul_waves * mmul_cyc + madd_waves * madd_cyc;
+  }
+
+  // Keyswitch BConv Montgomery: separate MMUL+MADD waves, or FMA/MAC + optional extra MMUL-only ops.
+  // FMA path: mac_ops = madd_ops (inner-product MACs); when mmul_ops > madd_ops, excess is phase1 mul-only
+  // (moddown: mmul−madd = N·|P|). Modup has mmul==madd ⇒ all MAC.
+  uint64_t vec_bconv_montgomery_service_cycles(uint64_t mmul_ops, uint64_t madd_ops) const {
+    if (!m_cfg.kswitch_bconv_use_fma_ops)
+      return vec_montgomery_ops_service_cycles(mmul_ops, madd_ops);
+    const uint64_t lanes = std::max<uint64_t>(1u, m_cfg.vec_lanes);
+    const uint64_t mac_cyc = std::max<uint64_t>(1u, m_cfg.vec_mac_cyc_per_op);
+    const uint64_t mul_cyc = std::max<uint64_t>(1u, m_cfg.vec_mmul_cyc_per_op);
+    const uint64_t extra_mul = (mmul_ops > madd_ops) ? (mmul_ops - madd_ops) : 0ULL;
+    const uint64_t mac_ops = madd_ops;
+    const uint64_t mac_waves = (mac_ops + lanes - 1) / lanes;
+    const uint64_t extra_waves = (extra_mul + lanes - 1) / lanes;
+    return m_cfg.vec_pass_overhead_cyc + mac_waves * mac_cyc + extra_waves * mul_cyc;
+  }
+
+  // Keyswitch BConv modeled as Montgomery MMUL/MADD matmul (final reduction absorbed).
+  uint64_t enqueue_vec_bconv_montgomery(uint64_t coeffs,
+                                        uint64_t mmul_ops,
+                                        uint64_t madd_ops,
+                                        uint64_t dep_done_cycles = 0) {
+    const uint64_t service = vec_bconv_montgomery_service_cycles(mmul_ops, madd_ops);
+    const uint64_t t_done = schedule(m_vec, service, 0, coeffs, dep_done_cycles);
+    bump_vec_lane(VecSplit::BConv, coeffs, service, t_done, mmul_ops, madd_ops);
     return t_done;
   }
 
@@ -501,12 +566,29 @@ class EngineModel {
   uint64_t enqueue_vec_mul(uint64_t coeffs, uint64_t dep_done_cycles = 0) {
     const uint64_t service = vec_mul_service_cycles(coeffs);
     const uint64_t t_done = schedule(m_vec, service, 0, coeffs, dep_done_cycles);
-    bump_vec_lane(false, coeffs, service, t_done);
+    bump_vec_lane(VecSplit::Arith, coeffs, service, t_done, /*mmul_ops=*/coeffs, /*madd_ops=*/0);
+    return t_done;
+  }
+
+  // Fused multiply-add on RNS coeff streams (same wave model as vec_mul; `mac_ops` in vec_arith).
+  uint64_t vec_mac_service_cycles(uint64_t coeffs) const {
+    const uint64_t lanes = std::max<uint64_t>(1u, m_cfg.vec_lanes);
+    const uint64_t waves = (coeffs + lanes - 1) / lanes;
+    return m_cfg.vec_pass_overhead_cyc + waves * m_cfg.vec_mac_steady_cyc_per_coeff;
+  }
+
+  uint64_t enqueue_vec_mac(uint64_t coeffs, uint64_t dep_done_cycles = 0) {
+    const uint64_t service = vec_mac_service_cycles(coeffs);
+    const uint64_t t_done = schedule(m_vec, service, 0, coeffs, dep_done_cycles);
+    bump_vec_lane(VecSplit::Mac, coeffs, service, t_done);
     return t_done;
   }
 
   uint64_t enqueue_vec_add(uint64_t coeffs, uint64_t dep_done_cycles = 0) {
-    return enqueue_vec_coeffs(coeffs, m_cfg.vec_add_cyc_per_coeff, dep_done_cycles);
+    const uint64_t t_done = enqueue_vec_coeffs(coeffs, m_cfg.vec_add_cyc_per_coeff, dep_done_cycles);
+    // enqueue_vec_coeffs bumps vec_arith.logical_ops; add MADD accounting here.
+    m_vec_arith.madd_ops += coeffs;
+    return t_done;
   }
 
   // ct×pt multiply_plain breakdown: DMA read -> NTT fwd -> VEC mul -> NTT inv -> DMA write.
@@ -821,7 +903,20 @@ class EngineModel {
       const uint64_t start = alpha * bi;
       const uint64_t part_limbs = (start < limbs) ? std::min<uint64_t>(alpha, limbs - start) : 0ULL;
       const uint64_t coeffs_excl_range = poly_degree * (size_QlP - part_limbs);
-      t = enqueue_vec_coeffs(coeffs_qlp, m_cfg.kswitch_modup_bconv_cyc_per_coeff, t, true);
+      // Phantom modup BConv matmul ops:
+      // out limbs = QlP \ partQl, in limbs = partQl.
+      const uint64_t obase_size = size_QlP - part_limbs;
+      const uint64_t ibase_size = part_limbs;
+      const uint64_t mmul = poly_degree * obase_size * ibase_size;
+      const uint64_t madd = poly_degree * obase_size * ibase_size;
+      if (m_cfg.kswitch_bconv_use_montgomery_ops) {
+        t = enqueue_vec_bconv_montgomery(coeffs_qlp, mmul, madd, t);
+      } else {
+        // Legacy coarse: constant cycles per coeff-element; still record ops for reporting.
+        t = enqueue_vec_coeffs(coeffs_qlp, m_cfg.kswitch_modup_bconv_cyc_per_coeff, t, true);
+        m_vec_bconv.mmul_ops += mmul;
+        m_vec_bconv.madd_ops += madd;
+      }
       // Phantom: forward NTT on QlP excluding [startPartIdx, endPartIdx) in Ql.
       t = enqueue_ntt_coeffs(coeffs_excl_range, poly_degree, t, false);
     }
@@ -835,7 +930,20 @@ class EngineModel {
       (void)part;
       // Phantom CKKS moddown_from_NTT: inverse-transform P only (Ql remains in NTT).
       t = enqueue_ntt_coeffs(coeffs_p, poly_degree, t, true);
-      t = enqueue_vec_coeffs(coeffs_ql, m_cfg.kswitch_moddown_bconv_cyc_per_coeff, t, true);
+      // Phantom moddown BConv ops (P -> Ql):
+      // - phase1 mult over P limbs: N*alpha MMUL
+      // - phase2 matmul: N*|Ql|*alpha MMUL + MADD
+      const uint64_t ibase_size = num_P;
+      const uint64_t obase_size = limbs;
+      const uint64_t mmul = poly_degree * (ibase_size + obase_size * ibase_size);
+      const uint64_t madd = poly_degree * (obase_size * ibase_size);
+      if (m_cfg.kswitch_bconv_use_montgomery_ops) {
+        t = enqueue_vec_bconv_montgomery(coeffs_ql, mmul, madd, t);
+      } else {
+        t = enqueue_vec_coeffs(coeffs_ql, m_cfg.kswitch_moddown_bconv_cyc_per_coeff, t, true);
+        m_vec_bconv.mmul_ops += mmul;
+        m_vec_bconv.madd_ops += madd;
+      }
       // Phantom CKKS: nwt_2d_radix8_forward_inplace_fuse_moddown runs over Ql.
       t = enqueue_ntt_coeffs(coeffs_ql, poly_degree, t, false);
       t = enqueue_vec_mul(coeffs_ql, t);

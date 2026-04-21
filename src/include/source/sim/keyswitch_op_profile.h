@@ -51,6 +51,16 @@ struct KeyswitchPhantomProfile {
   uint64_t weighted_bconv_coeff_elems = 0;
   uint64_t weighted_vec_mul_coeff_elems = 0;
   uint64_t weighted_vec_add_coeff_elems = 0;
+  // VEC op breakdown (Montgomery model; final reduction absorbed):
+  // Counted as "ops" not coeff_elems.
+  uint64_t bconv_modup_mmul_ops = 0;
+  uint64_t bconv_modup_madd_ops = 0;
+  uint64_t bconv_moddown_mmul_ops = 0;
+  uint64_t bconv_moddown_madd_ops = 0;
+  uint64_t bconv_mmul_ops = 0;
+  uint64_t bconv_madd_ops = 0;
+  uint64_t vec_mul_mmul_ops = 0;
+  uint64_t vec_add_madd_ops = 0;
 };
 
 // Fills counts for one keyswitch with given beta (already resolved: env override or phantom/legacy).
@@ -86,6 +96,37 @@ inline KeyswitchPhantomProfile compute_keyswitch_phantom_profile(uint64_t poly_d
   p.weighted_bconv_coeff_elems = p.beta * coeffs_qlp + 2 * coeffs_ql;
   p.weighted_vec_mul_coeff_elems = p.beta * coeffs_qlp + 2 * coeffs_ql;
   p.weighted_vec_add_coeff_elems = 2 * coeffs_ql;
+
+  // ----
+  // Montgomery-style op breakdown for VEC mapping (final reduce absorbed).
+  // ----
+  // We need alpha (digit size) to compute per-digit part size. In this analytic mirror, assume exact partition
+  // (size_Ql % alpha == 0) which is the default sweep policy. Derive alpha from num_P when unset (Phantom profile uses num_P=alpha).
+  const uint64_t alpha = std::max<uint64_t>(1ULL, num_P);
+  for (uint64_t bi = 0; bi < p.beta; ++bi) {
+    const uint64_t start = alpha * bi;
+    const uint64_t part_limbs = (start < size_Ql) ? std::min<uint64_t>(alpha, size_Ql - start) : 0ULL;
+    const uint64_t obase = size_QlP - part_limbs;
+    const uint64_t ibase = part_limbs;
+    const uint64_t mm = poly_degree * obase * ibase;
+    const uint64_t ma = poly_degree * obase * ibase;
+    p.bconv_modup_mmul_ops += mm;
+    p.bconv_modup_madd_ops += ma;
+  }
+  // moddown: P->Ql bConv_BEHZ done twice
+  {
+    const uint64_t ibase = num_P;
+    const uint64_t obase = size_Ql;
+    const uint64_t mmul_one = poly_degree * (ibase + obase * ibase);
+    const uint64_t madd_one = poly_degree * (obase * ibase);
+    p.bconv_moddown_mmul_ops += 2 * mmul_one;
+    p.bconv_moddown_madd_ops += 2 * madd_one;
+  }
+  p.bconv_mmul_ops = p.bconv_modup_mmul_ops + p.bconv_moddown_mmul_ops;
+  p.bconv_madd_ops = p.bconv_modup_madd_ops + p.bconv_moddown_madd_ops;
+  // vec arith
+  p.vec_mul_mmul_ops = p.weighted_vec_mul_coeff_elems;  // 1 MMUL per coeff-element
+  p.vec_add_madd_ops = p.weighted_vec_add_coeff_elems;  // 1 MADD per coeff-element
   return p;
 }
 
@@ -194,9 +235,12 @@ inline int moai_sim_hybrid_ks_profile_run() {
 
   csv << "alpha,t_qp,size_Ql,num_P,beta_mode,beta,dnum,ntt_kernels,ntt_fwd_kernels,ntt_inv_kernels,bconv_modup,bconv_moddown,vec_mul,vec_add,"
          "weighted_ntt_coeff_elems,weighted_ntt_fwd_coeff_elems,weighted_ntt_inv_coeff_elems,weighted_bconv_coeff_elems,weighted_vec_mul_coeff_elems,weighted_vec_add_coeff_elems,"
+         "bconv_modup_mmul_ops,bconv_modup_madd_ops,bconv_moddown_mmul_ops,bconv_moddown_madd_ops,"
+         "bconv_mmul_ops,bconv_madd_ops,vec_mul_mmul_ops,vec_add_madd_ops,"
          "key_bytes_est,mem_c2_bytes,mem_modup_buf_bytes,mem_cx_buf_bytes,mem_working_peak_bytes_est,"
          "eng_ntt_enq,eng_ntt_fwd_enq,eng_ntt_inv_enq,eng_vec_enq,eng_vec_bconv_enq,eng_vec_arith_enq,"
          "eng_ntt_coeff_ops,eng_ntt_fwd_coeff_ops,eng_ntt_inv_coeff_ops,eng_vec_coeff_ops,eng_vec_bconv_coeff_ops,eng_vec_arith_coeff_ops,"
+         "eng_vec_bconv_mmul_ops,eng_vec_bconv_madd_ops,eng_vec_arith_mmul_ops,eng_vec_arith_madd_ops,eng_vec_arith_mac_ops,"
          "eng_makespan_cyc,eng_ntt_busy_cyc,eng_ntt_fwd_busy_cyc,eng_ntt_inv_busy_cyc,eng_vec_busy_cyc,eng_vec_bconv_busy_cyc,eng_vec_arith_busy_cyc\n";
 
   std::cout << "[MOAI_HYBRID_KS_PROFILE] analytic = same graph as enqueue_keyswitch_phantom_ckks (not sampled).\n";
@@ -270,6 +314,11 @@ inline int moai_sim_hybrid_ks_profile_run() {
     int64_t eng_vec_busy_cyc = -1;
     int64_t eng_vec_bconv_busy_cyc = -1;
     int64_t eng_vec_arith_busy_cyc = -1;
+    int64_t eng_vec_bconv_mmul_ops = -1;
+    int64_t eng_vec_bconv_madd_ops = -1;
+    int64_t eng_vec_arith_mmul_ops = -1;
+    int64_t eng_vec_arith_madd_ops = -1;
+    int64_t eng_vec_arith_mac_ops = -1;
     if (measure_engine && EngineModel::enabled()) {
       {
         std::string av = std::to_string(alpha);
@@ -298,6 +347,11 @@ inline int moai_sim_hybrid_ks_profile_run() {
       eng_vec_busy_cyc = static_cast<int64_t>(sum.vec.busy_cycles);
       eng_vec_bconv_busy_cyc = static_cast<int64_t>(sum.vec_bconv.busy_cycles);
       eng_vec_arith_busy_cyc = static_cast<int64_t>(sum.vec_arith.busy_cycles);
+      eng_vec_bconv_mmul_ops = static_cast<int64_t>(sum.vec_bconv.mmul_ops);
+      eng_vec_bconv_madd_ops = static_cast<int64_t>(sum.vec_bconv.madd_ops);
+      eng_vec_arith_mmul_ops = static_cast<int64_t>(sum.vec_arith.mmul_ops);
+      eng_vec_arith_madd_ops = static_cast<int64_t>(sum.vec_arith.madd_ops);
+      eng_vec_arith_mac_ops = static_cast<int64_t>(sum.vec_arith.mac_ops);
     }
 
     csv << alpha << "," << T_chain << "," << size_Ql << "," << num_P << "," << (legacy_mode ? "legacy" : "phantom") << ","
@@ -305,11 +359,17 @@ inline int moai_sim_hybrid_ks_profile_run() {
         << "," << prof.bconv_modup_kernels << "," << prof.bconv_moddown_kernels << "," << prof.vec_mul_kernels << ","
         << prof.vec_add_kernels << "," << prof.weighted_ntt_coeff_elems << "," << prof.weighted_ntt_fwd_coeff_elems << ","
         << prof.weighted_ntt_inv_coeff_elems << "," << prof.weighted_bconv_coeff_elems << ","
-        << prof.weighted_vec_mul_coeff_elems << "," << prof.weighted_vec_add_coeff_elems << "," << key_bytes_est << ","
+        << prof.weighted_vec_mul_coeff_elems << "," << prof.weighted_vec_add_coeff_elems << ","
+        << prof.bconv_modup_mmul_ops << "," << prof.bconv_modup_madd_ops << "," << prof.bconv_moddown_mmul_ops << ","
+        << prof.bconv_moddown_madd_ops << ","
+        << prof.bconv_mmul_ops << "," << prof.bconv_madd_ops << "," << prof.vec_mul_mmul_ops << "," << prof.vec_add_madd_ops << ","
+        << key_bytes_est << ","
         << mem_c2_bytes << "," << mem_modup_buf_bytes << "," << mem_cx_buf_bytes << "," << mem_working_peak_bytes_est
-        << "," << eng_ntt << "," << eng_ntt_fwd << "," << eng_ntt_inv << "," << eng_vec << "," << eng_vec_bconv_enq << ","
+        << "," << eng_ntt << "," << eng_ntt_fwd << "," << eng_ntt_inv         << "," << eng_vec << "," << eng_vec_bconv_enq << ","
         << eng_vec_arith_enq << "," << eng_ntt_coeff_ops << "," << eng_ntt_fwd_coeff_ops << "," << eng_ntt_inv_coeff_ops
-        << "," << eng_vec_coeff_ops << "," << eng_vec_bconv_coeff_ops << "," << eng_vec_arith_coeff_ops << ","
+        << "," << eng_vec_coeff_ops << "," << eng_vec_bconv_coeff_ops << "," << eng_vec_arith_coeff_ops
+        << "," << eng_vec_bconv_mmul_ops << "," << eng_vec_bconv_madd_ops << "," << eng_vec_arith_mmul_ops << "," << eng_vec_arith_madd_ops << ","
+        << eng_vec_arith_mac_ops << ","
         << eng_makespan_cyc << "," << eng_ntt_busy_cyc << "," << eng_ntt_fwd_busy_cyc << "," << eng_ntt_inv_busy_cyc << ","
         << eng_vec_busy_cyc << "," << eng_vec_bconv_busy_cyc << "," << eng_vec_arith_busy_cyc << "\n";
 
